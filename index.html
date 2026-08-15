@@ -240,6 +240,33 @@
     display:inline-block; font-family:var(--mono); font-size:9px; padding:2px 6px; border-radius:3px;
     border:1px solid var(--line); color: var(--text-faint); text-transform:uppercase; letter-spacing:0.5px;
   }
+
+  .tv-ticker-wrap{
+    border-bottom: 1px solid var(--line);
+    background: var(--panel);
+  }
+  .chart-panel{
+    grid-column: 1 / -1;
+    margin-bottom: 4px;
+  }
+  .chart-panel .panel-body{
+    padding: 0;
+  }
+  #tvChartContainer{
+    height: 420px;
+  }
+  .chart-symbol-tabs{
+    display:flex; gap:6px; flex-wrap:wrap; padding: 6px 10px;
+    border-bottom: 1px solid var(--line);
+  }
+  .chart-tab{
+    background: var(--panel-2); border:1px solid var(--line); color: var(--text-dim);
+    font-family: var(--mono); font-size:11px; padding: 5px 10px; border-radius:4px;
+  }
+  .chart-tab.active{ color: var(--amber); border-color: var(--amber-dim); }
+  .data-source-note{
+    font-family: var(--mono); font-size:10px; color: var(--text-faint); padding: 8px 12px 0;
+  }
 </style>
 </head>
 <body>
@@ -266,6 +293,22 @@
     <div class="ribbon" id="ribbon"></div>
   </div>
 </header>
+
+<div class="tv-ticker-wrap">
+  <div class="tradingview-widget-container" id="tvTickerContainer"></div>
+</div>
+<div id="statusBanner" style="display:none; background:#3a1f00; color:#ffcf7a; font-family:var(--mono); font-size:11.5px; padding:9px 16px; border-bottom:1px solid var(--amber-dim);"></div>
+
+<div class="layout" style="padding-bottom:0;">
+  <div class="panel chart-panel">
+    <div class="panel-head">Live Chart <span class="count">TradingView — real-time</span></div>
+    <div class="chart-symbol-tabs" id="chartSymbolTabs"></div>
+    <div class="panel-body">
+      <div class="tradingview-widget-container" id="tvChartContainer"></div>
+    </div>
+    <div class="data-source-note">Chart data: TradingView (live) &nbsp;·&nbsp; Alert calculations: Twelve Data</div>
+  </div>
+</div>
 
 <div class="layout">
 
@@ -306,6 +349,11 @@
           <label>Twelve Data API key (optional)</label>
           <input id="apiKeyInput" type="password" placeholder="Leave blank for demo mode" />
           <div class="field-hint">Free key at <a href="https://twelvedata.com" target="_blank">twelvedata.com</a> — no card required. Without a key, Vigil runs on simulated candles so you can test alert logic.</div>
+        </div>
+        <div class="config-field">
+          <label>CORS proxy URL (required for live data)</label>
+          <input id="corsProxyInput" placeholder="https://your-proxy.workers.dev" />
+          <div class="field-hint">Twelve Data blocks direct browser calls. Deploy the free Cloudflare Worker in the setup guide, then paste its URL here.</div>
         </div>
         <div class="config-field">
           <label>Poll interval</label>
@@ -358,6 +406,9 @@
     watchlist: DEFAULT_WATCHLIST.slice(),
     detectors: Object.assign({}, DEFAULT_DETECTORS),
     apiKey: "",
+    corsProxyUrl: "",
+    lastFetchError: null,
+    lastFetchOk: null,
     pollInterval: 300000,
     soundOn: true,
     fxClose: "17:00",
@@ -380,36 +431,40 @@
   };
 
   // ---------------- STORAGE ----------------
+  // Uses localStorage — works on any real hosted site (GitHub Pages included).
+  // window.storage only exists inside Claude's own artifact preview, not on
+  // a deployed website, so it can't be used here.
   async function loadState(){
     try{
-      const r = await window.storage.get('vigil:config');
-      if(r && r.value){
-        const saved = JSON.parse(r.value);
+      const raw = localStorage.getItem('vigil:config');
+      if(raw){
+        const saved = JSON.parse(raw);
         Object.assign(state, saved, { alerts: state.alerts, quotes: state.quotes, demoCursor: state.demoCursor });
       }
-    }catch(e){ /* no saved config yet */ }
+    }catch(e){ /* no saved config yet, or storage unavailable */ }
     try{
-      const r2 = await window.storage.get('vigil:alerts');
-      if(r2 && r2.value){ state.alerts = JSON.parse(r2.value); }
+      const raw2 = localStorage.getItem('vigil:alerts');
+      if(raw2){ state.alerts = JSON.parse(raw2); }
     }catch(e){}
   }
   async function saveConfig(){
     try{
-      await window.storage.set('vigil:config', JSON.stringify({
+      localStorage.setItem('vigil:config', JSON.stringify({
         watchlist: state.watchlist,
         detectors: state.detectors,
         apiKey: state.apiKey,
+        corsProxyUrl: state.corsProxyUrl,
         pollInterval: state.pollInterval,
         soundOn: state.soundOn,
         fxClose: state.fxClose,
         idxClose: state.idxClose,
         crtClose: state.crtClose
       }));
-    }catch(e){ console.error('save failed', e); }
+    }catch(e){ console.error('save failed — private/incognito mode blocks localStorage', e); }
   }
   async function saveAlerts(){
     try{
-      await window.storage.set('vigil:alerts', JSON.stringify(state.alerts.slice(0,200)));
+      localStorage.setItem('vigil:alerts', JSON.stringify(state.alerts.slice(0,200)));
     }catch(e){ console.error('save alerts failed', e); }
   }
 
@@ -444,20 +499,46 @@
   // ---------------- DATA LAYER ----------------
   async function fetchCandles(symbol, interval, outputsize){
     if(state.apiKey && state.apiKey.trim()){
+      if(!state.corsProxyUrl || !state.corsProxyUrl.trim()){
+        state.lastFetchError = 'No CORS proxy URL set — Twelve Data blocks direct browser calls. Add your proxy URL in Setups.';
+        renderStatusBanner();
+        return generateDemoCandles(symbol, interval, outputsize);
+      }
       try{
-        const url = `https://api.twelvedata.com/time_series?symbol=${encodeURIComponent(symbol)}&interval=${interval}&outputsize=${outputsize}&timezone=America/New_York&apikey=${encodeURIComponent(state.apiKey.trim())}`;
+        const base = state.corsProxyUrl.trim().replace(/\/$/, '');
+        const url = `${base}/time_series?symbol=${encodeURIComponent(symbol)}&interval=${interval}&outputsize=${outputsize}&timezone=America/New_York&apikey=${encodeURIComponent(state.apiKey.trim())}`;
         const res = await fetch(url);
         const data = await res.json();
         if(data && data.values){
+          state.lastFetchError = null;
+          state.lastFetchOk = Date.now();
+          renderStatusBanner();
           return data.values.slice().reverse().map(v => ({
             t: v.datetime,
             o: parseFloat(v.open), h: parseFloat(v.high), l: parseFloat(v.low), c: parseFloat(v.close),
             v: v.volume ? parseFloat(v.volume) : estimateTickVolume(v)
           }));
+        } else {
+          state.lastFetchError = `${symbol}: ${(data && (data.message || data.status)) || 'No data returned — check symbol format or API key.'}`;
+          renderStatusBanner();
         }
-      }catch(e){ console.error('fetch failed, falling back to demo', e); }
+      }catch(e){
+        state.lastFetchError = `${symbol}: request failed (${e.message}) — check your proxy URL is correct and deployed.`;
+        renderStatusBanner();
+        console.error('fetch failed, falling back to demo', e);
+      }
     }
     return generateDemoCandles(symbol, interval, outputsize);
+  }
+  function renderStatusBanner(){
+    const el = document.getElementById('statusBanner');
+    if(!el) return;
+    if(state.apiKey && state.apiKey.trim() && state.lastFetchError){
+      el.style.display = 'block';
+      el.textContent = '⚠ ' + state.lastFetchError;
+    } else {
+      el.style.display = 'none';
+    }
   }
   function estimateTickVolume(v){
     return Math.round((Math.abs(parseFloat(v.high)-parseFloat(v.low)))*100000);
@@ -742,6 +823,75 @@
     return p.toFixed(5);
   }
 
+  // ---------------- TRADINGVIEW WIDGETS ----------------
+  const TV_SYMBOL_MAP = {
+    'SPX':'SP:SPX', 'US30':'DJ:DJI', 'DJI':'DJ:DJI', 'NAS100':'NASDAQ:IXIC', 'IXIC':'NASDAQ:IXIC',
+    'XAU/USD':'OANDA:XAUUSD', 'XAUUSD':'OANDA:XAUUSD'
+  };
+  function tvSymbolFor(symbol){
+    if(symbol.includes(':')) return symbol; // already TradingView format
+    if(TV_SYMBOL_MAP[symbol]) return TV_SYMBOL_MAP[symbol];
+    if(symbol.includes('/')) return 'FX:' + symbol.replace('/','');
+    return symbol;
+  }
+
+  function renderTvTicker(){
+    const el = document.getElementById('tvTickerContainer');
+    el.innerHTML = '<div class="tradingview-widget-container__widget"></div>';
+    const script = document.createElement('script');
+    script.type = 'text/javascript';
+    script.src = 'https://s3.tradingview.com/external-embedding/embed-widget-ticker-tape.js';
+    script.async = true;
+    script.text = JSON.stringify({
+      symbols: state.watchlist.map(s => ({ proName: tvSymbolFor(s), title: s })),
+      showSymbolLogo: true,
+      colorTheme: 'dark',
+      isTransparent: true,
+      displayMode: 'adaptive',
+      locale: 'en'
+    });
+    el.appendChild(script);
+  }
+
+  let activeChartSymbol = null;
+  function renderTvChart(symbol){
+    activeChartSymbol = symbol;
+    const el = document.getElementById('tvChartContainer');
+    el.innerHTML = '<div class="tradingview-widget-container__widget"></div>';
+    const script = document.createElement('script');
+    script.type = 'text/javascript';
+    script.src = 'https://s3.tradingview.com/external-embedding/embed-widget-advanced-chart.js';
+    script.async = true;
+    script.text = JSON.stringify({
+      autosize: true,
+      symbol: tvSymbolFor(symbol),
+      interval: '15',
+      timezone: 'America/New_York',
+      theme: 'dark',
+      style: '1',
+      locale: 'en',
+      backgroundColor: 'rgba(10, 12, 10, 1)',
+      gridColor: 'rgba(38, 43, 32, 0.3)',
+      hide_top_toolbar: false,
+      allow_symbol_change: true,
+      support_host: 'https://www.tradingview.com'
+    });
+    el.appendChild(script);
+    renderChartTabs();
+  }
+
+  function renderChartTabs(){
+    const el = document.getElementById('chartSymbolTabs');
+    el.innerHTML = '';
+    state.watchlist.forEach(symbol => {
+      const tab = document.createElement('button');
+      tab.className = 'chart-tab' + (symbol === activeChartSymbol ? ' active' : '');
+      tab.textContent = symbol;
+      tab.addEventListener('click', () => renderTvChart(symbol));
+      el.appendChild(tab);
+    });
+  }
+
   // ---------------- ALERT ENGINE ----------------
   async function runCycle(){
     for(const symbol of state.watchlist){
@@ -830,12 +980,19 @@
         </div>
         <button class="wl-remove" data-symbol="${symbol}">✕</button>
       `;
+      row.addEventListener('click', (e)=>{
+        if(e.target.closest('.wl-remove')) return;
+        renderTvChart(symbol);
+      });
+      row.style.cursor = 'pointer';
       el.appendChild(row);
     });
     el.querySelectorAll('.wl-remove').forEach(btn=>{
-      btn.addEventListener('click', ()=>{
+      btn.addEventListener('click', (e)=>{
+        e.stopPropagation();
         state.watchlist = state.watchlist.filter(s=>s!==btn.dataset.symbol);
-        saveConfig(); renderWatchlist();
+        saveConfig(); renderWatchlist(); renderTvTicker();
+        if(activeChartSymbol === btn.dataset.symbol) renderTvChart(state.watchlist[0] || 'EUR/USD');
       });
     });
   }
@@ -949,7 +1106,7 @@
       if(val && !state.watchlist.includes(val)){
         state.watchlist.push(val);
         input.value = '';
-        saveConfig(); renderWatchlist(); runCycle();
+        saveConfig(); renderWatchlist(); renderTvTicker(); runCycle();
       }
     });
     document.getElementById('addSymbolInput').addEventListener('keydown', (e)=>{
@@ -967,6 +1124,7 @@
     });
     document.getElementById('saveConfigBtn').addEventListener('click', ()=>{
       state.apiKey = document.getElementById('apiKeyInput').value;
+      state.corsProxyUrl = document.getElementById('corsProxyInput').value;
       state.pollInterval = parseInt(document.getElementById('pollIntervalSelect').value, 10);
       state.fxClose = document.getElementById('fxCloseInput').value || '17:00';
       state.idxClose = document.getElementById('idxCloseInput').value || '16:30';
@@ -994,6 +1152,7 @@
   async function init(){
     await loadState();
     document.getElementById('apiKeyInput').value = state.apiKey || '';
+    document.getElementById('corsProxyInput').value = state.corsProxyUrl || '';
     document.getElementById('pollIntervalSelect').value = String(state.pollInterval);
     document.getElementById('fxCloseInput').value = state.fxClose;
     document.getElementById('idxCloseInput').value = state.idxClose;
@@ -1007,6 +1166,8 @@
     renderRibbon();
     updateClock();
     updateModeIndicator();
+    renderTvTicker();
+    renderTvChart(state.watchlist[0] || 'EUR/USD');
 
     setInterval(updateClock, 1000);
     setInterval(renderRibbon, 60000);
