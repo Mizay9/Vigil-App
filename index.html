@@ -1,0 +1,1029 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Vigil — Session &amp; Structure Monitor</title>
+<link rel="manifest" href="manifest.json">
+<meta name="theme-color" content="#0A0C0A">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Vigil">
+<link rel="apple-touch-icon" href="icon-192.png">
+<link rel="icon" href="icon-192.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --void:#0A0C0A;
+    --panel:#12140F;
+    --panel-2:#181B14;
+    --line: #262b20;
+    --amber:#FFB000;
+    --amber-dim:#8a6300;
+    --bull:#3ECF8E;
+    --bear:#FF5C5C;
+    --text:#E9EAE3;
+    --text-dim:#7C8A78;
+    --text-faint:#4B5548;
+    --mono: 'IBM Plex Mono', monospace;
+    --disp: 'Space Grotesk', sans-serif;
+    --body: 'Inter', sans-serif;
+  }
+  *{box-sizing:border-box; margin:0; padding:0;}
+  html,body{height:100%;}
+  body{
+    background: radial-gradient(ellipse at top, #10130d 0%, #0A0C0A 60%);
+    color: var(--text);
+    font-family: var(--body);
+    min-height:100vh;
+    -webkit-font-smoothing: antialiased;
+  }
+  ::selection{ background: var(--amber); color:#000; }
+  button{ font-family: inherit; cursor:pointer; }
+  input, select{ font-family: inherit; }
+
+  /* ---------- HEADER ---------- */
+  header{
+    padding: 14px 20px 10px;
+    border-bottom: 1px solid var(--line);
+    background: linear-gradient(180deg, rgba(255,176,0,0.04), transparent);
+  }
+  .brand-row{
+    display:flex; align-items:baseline; justify-content:space-between; gap:12px; flex-wrap:wrap;
+  }
+  .brand{
+    display:flex; align-items:baseline; gap:10px;
+  }
+  .brand .mark{
+    font-family: var(--disp); font-weight:700; font-size:20px; letter-spacing:0.5px;
+    color: var(--amber);
+    text-shadow: 0 0 18px rgba(255,176,0,0.35);
+  }
+  .brand .tag{
+    font-family: var(--mono); font-size:11px; color: var(--text-dim); letter-spacing: 1px; text-transform:uppercase;
+  }
+  .status-row{
+    display:flex; align-items:center; gap:16px; font-family: var(--mono); font-size:11px; color: var(--text-dim);
+  }
+  .dot{ width:7px; height:7px; border-radius:50%; display:inline-block; margin-right:6px; }
+  .dot.live{ background: var(--bull); box-shadow: 0 0 8px var(--bull); }
+  .dot.demo{ background: var(--amber); box-shadow: 0 0 8px var(--amber); }
+  .hdr-btn{
+    background: transparent; border:1px solid var(--line); color: var(--text-dim);
+    padding: 6px 12px; border-radius: 3px; font-size:11px; font-family: var(--mono);
+    letter-spacing: 0.5px; transition: all .15s;
+  }
+  .hdr-btn:hover{ border-color: var(--amber); color: var(--amber); }
+
+  /* ---------- SESSION RIBBON (signature element) ---------- */
+  .ribbon-wrap{
+    margin-top: 14px;
+    border: 1px solid var(--line);
+    border-radius: 4px;
+    background: var(--panel);
+    padding: 10px 14px 8px;
+    overflow-x:auto;
+  }
+  .ribbon-label{
+    font-family: var(--mono); font-size: 10px; color: var(--text-faint); letter-spacing:1px; text-transform:uppercase;
+    margin-bottom:6px; display:flex; justify-content:space-between;
+  }
+  .ribbon{
+    position: relative;
+    height: 34px;
+    min-width: 720px;
+    border-radius: 3px;
+    overflow: visible;
+    display:flex;
+  }
+  .seg{
+    height:100%; position:relative; display:flex; align-items:center; justify-content:center;
+    font-family: var(--mono); font-size:10px; letter-spacing:1px; text-transform:uppercase;
+    color: rgba(233,234,227,0.55);
+    border-right: 1px solid rgba(255,255,255,0.04);
+  }
+  .seg.asia{ background: rgba(126,146,255,0.10); }
+  .seg.london{ background: rgba(62,207,142,0.10); }
+  .seg.ny{ background: rgba(255,176,0,0.12); }
+  .now-marker{
+    position:absolute; top:-4px; bottom:-4px; width:2px; background: var(--amber);
+    box-shadow: 0 0 8px var(--amber);
+  }
+  .now-marker::after{
+    content:''; position:absolute; top:-5px; left:-4px; width:10px; height:10px; border-radius:50%;
+    background: var(--amber); box-shadow: 0 0 10px var(--amber);
+  }
+  .sweep-tick{
+    position:absolute; bottom:-3px; width:2px; height:8px; background: var(--bear); border-radius:1px;
+  }
+  .sweep-tick.bull{ background: var(--bull); }
+
+  /* ---------- LAYOUT ---------- */
+  .layout{
+    display:grid;
+    grid-template-columns: 280px 1fr 300px;
+    gap: 14px;
+    padding: 14px 20px 40px;
+    align-items: start;
+  }
+  @media (max-width: 980px){
+    .layout{ grid-template-columns: 1fr; }
+  }
+  .panel{
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 5px;
+    overflow:hidden;
+  }
+  .panel-head{
+    padding: 10px 14px;
+    border-bottom: 1px solid var(--line);
+    display:flex; align-items:center; justify-content:space-between;
+    font-family: var(--disp); font-weight:600; font-size:13px; letter-spacing:0.3px;
+  }
+  .panel-head .count{
+    font-family: var(--mono); font-size:10px; color: var(--text-faint); font-weight:400;
+  }
+  .panel-body{ padding: 8px; }
+
+  /* Watchlist */
+  .wl-item{
+    display:flex; align-items:center; justify-content:space-between;
+    padding: 9px 10px; border-radius:4px; margin-bottom:4px;
+    background: var(--panel-2); border:1px solid transparent; cursor:default;
+  }
+  .wl-item:hover{ border-color: var(--line); }
+  .wl-sym{ font-family: var(--mono); font-size:12.5px; font-weight:600; }
+  .wl-meta{ display:flex; flex-direction:column; align-items:flex-end; gap:2px; }
+  .wl-price{ font-family: var(--mono); font-size:12.5px; }
+  .wl-chg{ font-family: var(--mono); font-size:10px; }
+  .wl-chg.up{ color: var(--bull); }
+  .wl-chg.down{ color: var(--bear); }
+  .wl-remove{ background:none; border:none; color: var(--text-faint); font-size:14px; padding: 0 4px; }
+  .wl-remove:hover{ color: var(--bear); }
+  .add-row{ display:flex; gap:6px; margin-top:8px; padding: 0 2px; }
+  .add-row input{
+    flex:1; background: var(--void); border:1px solid var(--line); color: var(--text);
+    padding: 8px 9px; border-radius:4px; font-family: var(--mono); font-size:12px;
+  }
+  .add-row button{
+    background: var(--amber); border:none; color:#1a1200; font-weight:600; padding: 0 14px;
+    border-radius:4px; font-size:12px;
+  }
+
+  /* Alert feed */
+  .alert-empty{
+    padding: 40px 20px; text-align:center; color: var(--text-faint); font-family: var(--mono); font-size:12px;
+  }
+  .alert{
+    display:flex; gap:10px; padding: 11px 12px; border-radius:5px; margin-bottom:6px;
+    background: var(--panel-2); border-left: 3px solid var(--line);
+    animation: slidein .25s ease-out;
+  }
+  @keyframes slidein{ from{ opacity:0; transform: translateY(-4px);} to{opacity:1; transform:none;} }
+  .alert.bull{ border-left-color: var(--bull); }
+  .alert.bear{ border-left-color: var(--bear); }
+  .alert.info{ border-left-color: var(--amber); }
+  .alert-icon{ font-size:16px; line-height:1; padding-top:1px; }
+  .alert-body{ flex:1; min-width:0; }
+  .alert-title{ font-size:12.5px; font-weight:600; margin-bottom:2px; }
+  .alert-sub{ font-size:11.5px; color: var(--text-dim); }
+  .alert-time{ font-family: var(--mono); font-size:10px; color: var(--text-faint); white-space:nowrap; }
+
+  /* Setups / config panel */
+  .setup-group{ margin-bottom:14px; }
+  .setup-group-title{
+    font-family: var(--mono); font-size:10px; color: var(--text-faint); letter-spacing:1px; text-transform:uppercase;
+    margin-bottom:8px; padding: 0 4px;
+  }
+  .toggle-row{
+    display:flex; align-items:center; justify-content:space-between;
+    padding: 7px 8px; font-size:12px; border-radius:4px;
+  }
+  .toggle-row:hover{ background: var(--panel-2); }
+  .switch{
+    width:32px; height:18px; border-radius: 10px; background: var(--line); position:relative; border:none; flex-shrink:0;
+    transition: background .15s;
+  }
+  .switch.on{ background: var(--amber-dim); }
+  .switch::after{
+    content:''; position:absolute; top:2px; left:2px; width:14px; height:14px; border-radius:50%;
+    background: var(--text-dim); transition: all .15s;
+  }
+  .switch.on::after{ left:16px; background: var(--amber); }
+
+  .config-field{ padding: 6px 4px; margin-bottom:6px; }
+  .config-field label{ display:block; font-size:11px; color: var(--text-dim); margin-bottom:4px; }
+  .config-field input, .config-field select{
+    width:100%; background: var(--void); border:1px solid var(--line); color: var(--text);
+    padding: 8px 9px; border-radius:4px; font-size:12px;
+  }
+  .field-hint{ font-size:10.5px; color: var(--text-faint); margin-top:4px; line-height:1.4; }
+  .primary-btn{
+    width:100%; background: var(--amber); border:none; color:#1a1200; font-weight:600; padding: 9px;
+    border-radius:4px; font-size:12px; margin-top:6px;
+  }
+  .ghost-btn{
+    width:100%; background: transparent; border:1px solid var(--line); color: var(--text-dim); padding: 9px;
+    border-radius:4px; font-size:12px; margin-top:6px;
+  }
+  .ghost-btn:hover{ border-color: var(--text-dim); color: var(--text); }
+
+  footer{
+    text-align:center; padding: 18px; color: var(--text-faint); font-family: var(--mono); font-size:10.5px;
+    border-top: 1px solid var(--line);
+  }
+  a{ color: var(--amber); }
+
+  .badge{
+    display:inline-block; font-family:var(--mono); font-size:9px; padding:2px 6px; border-radius:3px;
+    border:1px solid var(--line); color: var(--text-faint); text-transform:uppercase; letter-spacing:0.5px;
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="brand-row">
+    <div class="brand">
+      <span class="mark">VIGIL</span>
+      <span class="tag">Session &amp; Structure Monitor</span>
+    </div>
+    <div class="status-row">
+      <span id="modeIndicator"><span class="dot demo"></span>Demo data</span>
+      <span id="clockDisplay">--:--:-- NY</span>
+      <button class="hdr-btn" id="soundToggleBtn">🔊 Sound on</button>
+      <button class="hdr-btn" id="notifyBtn">Enable notifications</button>
+    </div>
+  </div>
+
+  <div class="ribbon-wrap">
+    <div class="ribbon-label">
+      <span>Session Timeline — New York Time</span>
+      <span id="ribbonSubLabel">Asian / London / New York</span>
+    </div>
+    <div class="ribbon" id="ribbon"></div>
+  </div>
+</header>
+
+<div class="layout">
+
+  <!-- WATCHLIST -->
+  <div class="panel">
+    <div class="panel-head">Watchlist <span class="count" id="wlCount">0</span></div>
+    <div class="panel-body">
+      <div id="watchlist"></div>
+      <div class="add-row">
+        <input id="addSymbolInput" placeholder="e.g. EUR/USD, XAU/USD, SPX" />
+        <button id="addSymbolBtn">Add</button>
+      </div>
+      <div class="field-hint" style="padding:6px 4px;">Forex as EUR/USD · Gold as XAU/USD · Indices as SPX, IXIC, DJI (Twelve Data symbols)</div>
+    </div>
+  </div>
+
+  <!-- ALERT FEED -->
+  <div class="panel">
+    <div class="panel-head">Alert Feed <span class="count" id="alertCount">0 today</span></div>
+    <div class="panel-body" id="alertFeed">
+      <div class="alert-empty">Watching. Alerts will appear here as conditions are met.</div>
+    </div>
+  </div>
+
+  <!-- CONFIG -->
+  <div class="panel">
+    <div class="panel-head">Setups</div>
+    <div class="panel-body">
+
+      <div class="setup-group">
+        <div class="setup-group-title">Price Action</div>
+        <div id="detectorToggles"></div>
+      </div>
+
+      <div class="setup-group">
+        <div class="setup-group-title">Data Source</div>
+        <div class="config-field">
+          <label>Twelve Data API key (optional)</label>
+          <input id="apiKeyInput" type="password" placeholder="Leave blank for demo mode" />
+          <div class="field-hint">Free key at <a href="https://twelvedata.com" target="_blank">twelvedata.com</a> — no card required. Without a key, Vigil runs on simulated candles so you can test alert logic.</div>
+        </div>
+        <div class="config-field">
+          <label>Poll interval</label>
+          <select id="pollIntervalSelect">
+            <option value="60000">Every 1 minute</option>
+            <option value="300000" selected>Every 5 minutes</option>
+            <option value="900000">Every 15 minutes</option>
+          </select>
+          <div class="field-hint">Free API tiers are rate-limited — 5 min is safe for a handful of symbols.</div>
+        </div>
+        <button class="primary-btn" id="saveConfigBtn">Save &amp; Apply</button>
+        <button class="ghost-btn" id="clearAlertsBtn">Clear alert history</button>
+      </div>
+
+      <div class="setup-group">
+        <div class="setup-group-title">Reference times (NY)</div>
+        <div class="config-field"><label>Daily close — FX</label><input id="fxCloseInput" value="17:00" /></div>
+        <div class="config-field"><label>Daily close — Indices/Gold</label><input id="idxCloseInput" value="16:30" /></div>
+        <div class="config-field"><label>CRT candle close (FX, 4H)</label><input id="crtCloseInput" value="09:00" /></div>
+        <div class="field-hint">Tune these to match your own model — these are heuristics, not guaranteed signals.</div>
+      </div>
+
+    </div>
+  </div>
+
+</div>
+
+<footer>
+  Runs entirely in this tab — closing it pauses monitoring. Notifications work while the browser is open in the background, not fully closed.<br>
+  Heuristic detection of structure, FVGs and liquidity sweeps — always confirm on your own chart before acting.
+</footer>
+
+<script>
+(function(){
+  "use strict";
+
+  // ---------------- STATE ----------------
+  const DEFAULT_WATCHLIST = ["EUR/USD","GBP/USD","XAU/USD","SPX"];
+  const DEFAULT_DETECTORS = {
+    volumeSpike: true,
+    rsiMa: true,
+    sessionSweep: true,
+    bosChoch: true,
+    fvg: true,
+    dailyCloseRejection: true,
+    crt: true
+  };
+
+  let state = {
+    watchlist: DEFAULT_WATCHLIST.slice(),
+    detectors: Object.assign({}, DEFAULT_DETECTORS),
+    apiKey: "",
+    pollInterval: 300000,
+    soundOn: true,
+    fxClose: "17:00",
+    idxClose: "16:30",
+    crtClose: "09:00",
+    quotes: {},        // symbol -> {price, change}
+    alerts: [],         // {id, symbol, type, direction, title, sub, ts}
+    firedKeys: {},      // dedupe key -> ts (today)
+    demoCursor: {}      // per symbol synthetic candle generator state
+  };
+
+  const DETECTOR_LABELS = {
+    volumeSpike: "Volume spikes",
+    rsiMa: "RSI / moving average",
+    sessionSweep: "Session high/low sweeps",
+    bosChoch: "Break of structure / CHoCH",
+    fvg: "Fair value gaps",
+    dailyCloseRejection: "Daily close rejection",
+    crt: "Candle range theory (CRT)"
+  };
+
+  // ---------------- STORAGE ----------------
+  async function loadState(){
+    try{
+      const r = await window.storage.get('vigil:config');
+      if(r && r.value){
+        const saved = JSON.parse(r.value);
+        Object.assign(state, saved, { alerts: state.alerts, quotes: state.quotes, demoCursor: state.demoCursor });
+      }
+    }catch(e){ /* no saved config yet */ }
+    try{
+      const r2 = await window.storage.get('vigil:alerts');
+      if(r2 && r2.value){ state.alerts = JSON.parse(r2.value); }
+    }catch(e){}
+  }
+  async function saveConfig(){
+    try{
+      await window.storage.set('vigil:config', JSON.stringify({
+        watchlist: state.watchlist,
+        detectors: state.detectors,
+        apiKey: state.apiKey,
+        pollInterval: state.pollInterval,
+        soundOn: state.soundOn,
+        fxClose: state.fxClose,
+        idxClose: state.idxClose,
+        crtClose: state.crtClose
+      }));
+    }catch(e){ console.error('save failed', e); }
+  }
+  async function saveAlerts(){
+    try{
+      await window.storage.set('vigil:alerts', JSON.stringify(state.alerts.slice(0,200)));
+    }catch(e){ console.error('save alerts failed', e); }
+  }
+
+  // ---------------- TIME HELPERS ----------------
+  function nyParts(date){
+    const fmt = new Intl.DateTimeFormat('en-US', {
+      timeZone: 'America/New_York', hour12:false,
+      hour:'2-digit', minute:'2-digit', second:'2-digit',
+      weekday:'short'
+    });
+    const parts = fmt.formatToParts(date);
+    const obj = {};
+    parts.forEach(p => obj[p.type] = p.value);
+    return { h:+obj.hour, m:+obj.minute, s:+obj.second, wd: obj.weekday };
+  }
+  function nyMinutesNow(){
+    const p = nyParts(new Date());
+    return p.h*60+p.m;
+  }
+  function hhmmToMinutes(str){
+    const [h,m] = str.split(':').map(Number);
+    return h*60+(m||0);
+  }
+
+  const SESSIONS = [
+    { name:'asia', label:'Asian', start: 19*60, end: 24*60 }, // 7pm-12am
+    { name:'asia2', label:'Asian', start: 0, end: 3*60 },      // 12am-3am (wrap)
+    { name:'london', label:'London', start: 3*60, end: 8*60 },
+    { name:'ny', label:'New York', start: 8*60, end: 17*60 }
+  ];
+
+  // ---------------- DATA LAYER ----------------
+  async function fetchCandles(symbol, interval, outputsize){
+    if(state.apiKey && state.apiKey.trim()){
+      try{
+        const url = `https://api.twelvedata.com/time_series?symbol=${encodeURIComponent(symbol)}&interval=${interval}&outputsize=${outputsize}&timezone=America/New_York&apikey=${encodeURIComponent(state.apiKey.trim())}`;
+        const res = await fetch(url);
+        const data = await res.json();
+        if(data && data.values){
+          return data.values.slice().reverse().map(v => ({
+            t: v.datetime,
+            o: parseFloat(v.open), h: parseFloat(v.high), l: parseFloat(v.low), c: parseFloat(v.close),
+            v: v.volume ? parseFloat(v.volume) : estimateTickVolume(v)
+          }));
+        }
+      }catch(e){ console.error('fetch failed, falling back to demo', e); }
+    }
+    return generateDemoCandles(symbol, interval, outputsize);
+  }
+  function estimateTickVolume(v){
+    return Math.round((Math.abs(parseFloat(v.high)-parseFloat(v.low)))*100000);
+  }
+
+  function seededRandom(seed){
+    let s = seed % 2147483647; if(s<=0) s += 2147483646;
+    return function(){ s = (s*16807) % 2147483647; return (s-1)/2147483646; };
+  }
+  function hashStr(str){ let h=0; for(let i=0;i<str.length;i++){ h = (h*31 + str.charCodeAt(i))|0; } return Math.abs(h); }
+
+  function generateDemoCandles(symbol, interval, outputsize){
+    const intervalMinutes = { '15min':15, '1h':60, '4h':240, '30min':30 }[interval] || 60;
+    if(!state.demoCursor[symbol+interval]){
+      const rnd = seededRandom(hashStr(symbol+interval));
+      const base = symbol.includes('XAU') ? 2400 : symbol.includes('/') ? 1.1 : 5500;
+      state.demoCursor[symbol+interval] = { rnd, price: base, seedInit: true };
+    }
+    const cursor = state.demoCursor[symbol+interval];
+    const candles = [];
+    let price = cursor.price;
+    const now = Date.now();
+    for(let i=outputsize-1; i>=0; i--){
+      const t = new Date(now - i*intervalMinutes*60000);
+      const vol = price * 0.0015;
+      const drift = (cursor.rnd()-0.5) * vol;
+      const o = price;
+      const c = price + drift;
+      const wick = Math.abs(drift) * (0.5 + cursor.rnd());
+      const h = Math.max(o,c) + wick*cursor.rnd();
+      const l = Math.min(o,c) - wick*cursor.rnd();
+      price = c;
+      candles.push({
+        t: nyISOFromDate(t),
+        o, h, l, c,
+        v: Math.round(1000 + cursor.rnd()*4000)
+      });
+    }
+    cursor.price = price;
+    return candles;
+  }
+  function nyISOFromDate(d){
+    const p = nyParts(d);
+    const y = d.getFullYear(), mo = String(d.getMonth()+1).padStart(2,'0'), da = String(d.getDate()).padStart(2,'0');
+    return `${y}-${mo}-${da} ${String(p.h).padStart(2,'0')}:${String(p.m).padStart(2,'0')}:00`;
+  }
+
+  // ---------------- INDICATORS ----------------
+  function sma(values, period){
+    if(values.length < period) return null;
+    const slice = values.slice(-period);
+    return slice.reduce((a,b)=>a+b,0)/period;
+  }
+  function rsi(closes, period){
+    if(closes.length < period+1) return null;
+    let gains=0, losses=0;
+    for(let i=closes.length-period; i<closes.length; i++){
+      const diff = closes[i]-closes[i-1];
+      if(diff>=0) gains+=diff; else losses-=diff;
+    }
+    const avgGain = gains/period, avgLoss = losses/period;
+    if(avgLoss===0) return 100;
+    const rs = avgGain/avgLoss;
+    return 100 - (100/(1+rs));
+  }
+
+  // ---------------- DETECTORS ----------------
+  function findSwings(candles, lookback){
+    const swings = [];
+    for(let i=lookback; i<candles.length-lookback; i++){
+      const window_ = candles.slice(i-lookback, i+lookback+1);
+      const isHigh = candles[i].h === Math.max(...window_.map(c=>c.h));
+      const isLow = candles[i].l === Math.min(...window_.map(c=>c.l));
+      if(isHigh) swings.push({ i, type:'high', price: candles[i].h, t: candles[i].t });
+      if(isLow) swings.push({ i, type:'low', price: candles[i].l, t: candles[i].t });
+    }
+    return swings;
+  }
+
+  function detectBosChoch(symbol, candles){
+    const alerts = [];
+    const swings = findSwings(candles, 2);
+    if(swings.length < 3) return alerts;
+    const highs = swings.filter(s=>s.type==='high');
+    const lows = swings.filter(s=>s.type==='low');
+    if(!highs.length || !lows.length) return alerts;
+    const lastHigh = highs[highs.length-1];
+    const lastLow = lows[lows.length-1];
+    const lastClose = candles[candles.length-1].c;
+    const trendUp = highs.length>1 && highs[highs.length-1].price > highs[highs.length-2].price;
+    if(lastClose > lastHigh.price){
+      const key = `${symbol}-struct-up-${lastHigh.i}`;
+      alerts.push({ key, type: trendUp ? 'BOS' : 'CHoCH', direction:'bull',
+        title: `${symbol}: ${trendUp?'Break of structure':'Change of character'} — bullish`,
+        sub: `Close broke above swing high at ${fmtPrice(lastHigh.price)}` });
+    }
+    if(lastClose < lastLow.price){
+      const key = `${symbol}-struct-dn-${lastLow.i}`;
+      const trendDown = lows.length>1 && lows[lows.length-1].price < lows[lows.length-2].price;
+      alerts.push({ key, type: trendDown ? 'BOS' : 'CHoCH', direction:'bear',
+        title: `${symbol}: ${trendDown?'Break of structure':'Change of character'} — bearish`,
+        sub: `Close broke below swing low at ${fmtPrice(lastLow.price)}` });
+    }
+    return alerts;
+  }
+
+  function detectFVG(symbol, candles){
+    const alerts = [];
+    const n = candles.length;
+    for(let i=2; i<n; i++){
+      const c1 = candles[i-2], c3 = candles[i];
+      if(c1.h < c3.l){
+        // bullish FVG
+        const mid = (c1.h+c3.l)/2;
+        const last = candles[n-1];
+        if(i === n-1){
+          alerts.push({ key:`${symbol}-fvg-bull-new-${i}`, type:'FVG', direction:'bull',
+            title:`${symbol}: Bullish FVG formed`, sub:`Gap ${fmtPrice(c1.h)} – ${fmtPrice(c3.l)}` });
+        } else if(last.l <= c3.l && last.l >= c1.h && last.c > mid){
+          alerts.push({ key:`${symbol}-fvg-bull-respect-${i}`, type:'FVG', direction:'bull',
+            title:`${symbol}: Bullish FVG respected`, sub:`Price tapped ${fmtPrice(c1.h)}–${fmtPrice(c3.l)} and held` });
+        } else if(last.c < c1.h){
+          alerts.push({ key:`${symbol}-fvg-bull-violated-${i}`, type:'FVG', direction:'bear',
+            title:`${symbol}: Bullish FVG violated`, sub:`Close broke fully through ${fmtPrice(c1.h)}` });
+        }
+      }
+      if(c1.l > c3.h){
+        // bearish FVG
+        const mid = (c3.h+c1.l)/2;
+        const last = candles[n-1];
+        if(i === n-1){
+          alerts.push({ key:`${symbol}-fvg-bear-new-${i}`, type:'FVG', direction:'bear',
+            title:`${symbol}: Bearish FVG formed`, sub:`Gap ${fmtPrice(c3.h)} – ${fmtPrice(c1.l)}` });
+        } else if(last.h >= c3.h && last.h <= c1.l && last.c < mid){
+          alerts.push({ key:`${symbol}-fvg-bear-respect-${i}`, type:'FVG', direction:'bear',
+            title:`${symbol}: Bearish FVG respected`, sub:`Price tapped ${fmtPrice(c3.h)}–${fmtPrice(c1.l)} and held` });
+        } else if(last.c > c1.l){
+          alerts.push({ key:`${symbol}-fvg-bear-violated-${i}`, type:'FVG', direction:'bull',
+            title:`${symbol}: Bearish FVG violated`, sub:`Close broke fully through ${fmtPrice(c1.l)}` });
+        }
+      }
+    }
+    return alerts.slice(-4); // avoid flooding
+  }
+
+  function sessionRangeToday(candles15, session){
+    const today = nyParts(new Date());
+    const results = candles15.filter(c => {
+      const d = new Date(c.t.replace(' ','T'));
+      const p = nyParts(d);
+      const mins = p.h*60+p.m;
+      // rough same-day filter using date match on the NY-formatted string's date part
+      return c.t.startsWith(dateKeyFromParts()) && mins >= session.start && mins < session.end;
+    });
+    if(!results.length) return null;
+    return {
+      high: Math.max(...results.map(c=>c.h)),
+      low: Math.min(...results.map(c=>c.l))
+    };
+  }
+  function dateKeyFromParts(){
+    const d = new Date();
+    return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+  }
+
+  function detectSessionSweep(symbol, candles15){
+    const alerts = [];
+    const asia = sessionRangeToday(candles15, SESSIONS[0]) || sessionRangeToday(candles15, SESSIONS[1]);
+    const london = sessionRangeToday(candles15, SESSIONS[2]);
+    const ny = sessionRangeToday(candles15, SESSIONS[3]);
+    const lastClose = candles15[candles15.length-1] ? candles15[candles15.length-1].c : null;
+    const nowMin = nyMinutesNow();
+    if(asia && london && nowMin >= SESSIONS[2].start){
+      if(london.high > asia.high) alerts.push({ key:`${symbol}-sweep-asia-high-${dateKeyFromParts()}`, type:'Sweep', direction:'bear',
+        title:`${symbol}: Asian high swept by London`, sub:`Asian high ${fmtPrice(asia.high)} taken out` });
+      if(london.low < asia.low) alerts.push({ key:`${symbol}-sweep-asia-low-${dateKeyFromParts()}`, type:'Sweep', direction:'bull',
+        title:`${symbol}: Asian low swept by London`, sub:`Asian low ${fmtPrice(asia.low)} taken out` });
+    }
+    if(london && ny && nowMin >= SESSIONS[3].start){
+      if(ny.high > london.high) alerts.push({ key:`${symbol}-sweep-london-high-${dateKeyFromParts()}`, type:'Sweep', direction:'bear',
+        title:`${symbol}: London high swept by New York`, sub:`London high ${fmtPrice(london.high)} taken out` });
+      if(ny.low < london.low) alerts.push({ key:`${symbol}-sweep-london-low-${dateKeyFromParts()}`, type:'Sweep', direction:'bull',
+        title:`${symbol}: London low swept by New York`, sub:`London low ${fmtPrice(london.low)} taken out` });
+    }
+    return alerts;
+  }
+
+  function detectDailyCloseRejection(symbol, candles30, closeTimeStr, label){
+    const targetMin = hhmmToMinutes(closeTimeStr);
+    const alerts = [];
+    const todayKey = dateKeyFromParts();
+    const candidate = candles30.filter(c=>c.t.startsWith(todayKey)).find(c=>{
+      const d = new Date(c.t.replace(' ','T'));
+      const p = nyParts(d);
+      return Math.abs((p.h*60+p.m) - targetMin) <= 15;
+    });
+    if(!candidate) return alerts;
+    const range = candidate.h - candidate.l;
+    if(range <= 0) return alerts;
+    const upperWick = candidate.h - Math.max(candidate.o, candidate.c);
+    const lowerWick = Math.min(candidate.o, candidate.c) - candidate.l;
+    if(lowerWick/range > 0.6){
+      alerts.push({ key:`${symbol}-dclose-rej-bull-${todayKey}`, type:'Daily Close', direction:'bull',
+        title:`${symbol}: ${label} close rejection — bullish`, sub:`Long lower wick into ${closeTimeStr} NY close` });
+    } else if(upperWick/range > 0.6){
+      alerts.push({ key:`${symbol}-dclose-rej-bear-${todayKey}`, type:'Daily Close', direction:'bear',
+        title:`${symbol}: ${label} close rejection — bearish`, sub:`Long upper wick into ${closeTimeStr} NY close` });
+    }
+    return alerts;
+  }
+
+  function detectCRT(symbol, candles4h, candles15, crtCloseStr){
+    const alerts = [];
+    const targetMin = hhmmToMinutes(crtCloseStr);
+    const todayKey = dateKeyFromParts();
+    const refCandle = candles4h.slice().reverse().find(c=>{
+      const d = new Date(c.t.replace(' ','T'));
+      const p = nyParts(d);
+      return Math.abs((p.h*60+p.m)-targetMin) <= 30;
+    });
+    if(!refCandle) return alerts;
+    const after = candles15.filter(c => new Date(c.t.replace(' ','T')) > new Date(refCandle.t.replace(' ','T')));
+    if(after.length < 2) return alerts;
+    const broke = after.find(c=>c.h > refCandle.h || c.l < refCandle.l);
+    if(!broke) return alerts;
+    const last = after[after.length-1];
+    if(broke.h > refCandle.h && last.c < refCandle.h){
+      alerts.push({ key:`${symbol}-crt-bear-${todayKey}`, type:'CRT', direction:'bear',
+        title:`${symbol}: CRT manipulation — bearish reversal`, sub:`Swept above ${fmtPrice(refCandle.h)}, closed back inside range` });
+    } else if(broke.l < refCandle.l && last.c > refCandle.l){
+      alerts.push({ key:`${symbol}-crt-bull-${todayKey}`, type:'CRT', direction:'bull',
+        title:`${symbol}: CRT manipulation — bullish reversal`, sub:`Swept below ${fmtPrice(refCandle.l)}, closed back inside range` });
+    }
+    return alerts;
+  }
+
+  function detectVolumeSpike(symbol, candles){
+    const alerts = [];
+    if(candles.length < 21) return alerts;
+    const vols = candles.map(c=>c.v);
+    const avg = sma(vols.slice(0,-1), 20);
+    const last = candles[candles.length-1];
+    if(avg && last.v > avg*2.2){
+      alerts.push({ key:`${symbol}-volspike-${last.t}`, type:'Volume', direction: last.c>=last.o?'bull':'bear',
+        title:`${symbol}: Volume spike`, sub:`${Math.round(last.v/avg*100)}% of 20-period average` });
+    }
+    return alerts;
+  }
+
+  function detectRsiMa(symbol, candles){
+    const alerts = [];
+    const closes = candles.map(c=>c.c);
+    const r = rsi(closes, 14);
+    const ma20 = sma(closes, 20);
+    const ma50 = sma(closes, 50);
+    const last = closes[closes.length-1];
+    const todayKey = dateKeyFromParts();
+    if(r !== null){
+      if(r >= 70) alerts.push({ key:`${symbol}-rsi-ob-${todayKey}`, type:'RSI', direction:'bear',
+        title:`${symbol}: RSI overbought (${r.toFixed(1)})`, sub:`14-period RSI above 70` });
+      if(r <= 30) alerts.push({ key:`${symbol}-rsi-os-${todayKey}`, type:'RSI', direction:'bull',
+        title:`${symbol}: RSI oversold (${r.toFixed(1)})`, sub:`14-period RSI below 30` });
+    }
+    if(ma20 && ma50){
+      const prevCloses = closes.slice(0,-1);
+      const prevMa20 = sma(prevCloses, 20);
+      const prevMa50 = sma(prevCloses, 50);
+      if(prevMa20 && prevMa50){
+        if(prevMa20 <= prevMa50 && ma20 > ma50) alerts.push({ key:`${symbol}-ma-cross-up-${last}`, type:'MA Cross', direction:'bull',
+          title:`${symbol}: 20 MA crossed above 50 MA`, sub:`Bullish moving average cross` });
+        if(prevMa20 >= prevMa50 && ma20 < ma50) alerts.push({ key:`${symbol}-ma-cross-dn-${last}`, type:'MA Cross', direction:'bear',
+          title:`${symbol}: 20 MA crossed below 50 MA`, sub:`Bearish moving average cross` });
+      }
+    }
+    return alerts;
+  }
+
+  function fmtPrice(p){
+    if(p == null || isNaN(p)) return '—';
+    if(p > 1000) return p.toFixed(2);
+    if(p > 50) return p.toFixed(2);
+    return p.toFixed(5);
+  }
+
+  // ---------------- ALERT ENGINE ----------------
+  async function runCycle(){
+    for(const symbol of state.watchlist){
+      try{
+        const [c15, c30, c1h, c4h] = await Promise.all([
+          fetchCandles(symbol, '15min', 120),
+          fetchCandles(symbol, '30min', 60),
+          fetchCandles(symbol, '1h', 120),
+          fetchCandles(symbol, '4h', 80)
+        ]);
+        if(c1h.length){
+          const last = c1h[c1h.length-1];
+          const prev = c1h[c1h.length-2] || last;
+          state.quotes[symbol] = { price: last.c, change: prev.c ? ((last.c-prev.c)/prev.c*100) : 0 };
+        }
+        let found = [];
+        if(state.detectors.volumeSpike) found = found.concat(detectVolumeSpike(symbol, c1h));
+        if(state.detectors.rsiMa) found = found.concat(detectRsiMa(symbol, c1h));
+        if(state.detectors.sessionSweep) found = found.concat(detectSessionSweep(symbol, c15));
+        if(state.detectors.bosChoch) found = found.concat(detectBosChoch(symbol, c4h));
+        if(state.detectors.fvg) found = found.concat(detectFVG(symbol, c1h));
+        if(state.detectors.dailyCloseRejection){
+          const isFx = symbol.includes('/') && !symbol.includes('XAU');
+          found = found.concat(detectDailyCloseRejection(symbol, c30, isFx?state.fxClose:state.idxClose, isFx?'FX':'Index/Gold'));
+        }
+        if(state.detectors.crt) found = found.concat(detectCRT(symbol, c4h, c15, state.crtClose));
+
+        found.forEach(f => {
+          if(state.firedKeys[f.key]) return;
+          state.firedKeys[f.key] = Date.now();
+          pushAlert(symbol, f);
+        });
+      }catch(e){ console.error('cycle error for', symbol, e); }
+    }
+    renderWatchlist();
+    saveAlerts();
+  }
+
+  function pushAlert(symbol, f){
+    const entry = {
+      id: Date.now()+Math.random(),
+      symbol, type:f.type, direction:f.direction, title:f.title, sub:f.sub,
+      ts: Date.now()
+    };
+    state.alerts.unshift(entry);
+    state.alerts = state.alerts.slice(0,200);
+    renderAlertFeed();
+    if(state.soundOn) beep(f.direction);
+    if(window.Notification && Notification.permission === 'granted'){
+      new Notification(f.title, { body: f.sub, silent:true });
+    }
+  }
+
+  let audioCtx;
+  function beep(direction){
+    try{
+      audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)();
+      const o = audioCtx.createOscillator();
+      const g = audioCtx.createGain();
+      o.type = 'sine';
+      o.frequency.value = direction==='bull' ? 880 : direction==='bear' ? 440 : 660;
+      g.gain.value = 0.05;
+      o.connect(g); g.connect(audioCtx.destination);
+      o.start();
+      g.gain.exponentialRampToValueAtTime(0.0001, audioCtx.currentTime + 0.35);
+      o.stop(audioCtx.currentTime + 0.35);
+    }catch(e){}
+  }
+
+  // ---------------- RENDER ----------------
+  function renderWatchlist(){
+    const el = document.getElementById('watchlist');
+    document.getElementById('wlCount').textContent = state.watchlist.length;
+    el.innerHTML = '';
+    state.watchlist.forEach(symbol => {
+      const q = state.quotes[symbol];
+      const row = document.createElement('div');
+      row.className = 'wl-item';
+      const chgClass = q && q.change >= 0 ? 'up' : 'down';
+      const chgSign = q && q.change >= 0 ? '+' : '';
+      row.innerHTML = `
+        <span class="wl-sym">${symbol}</span>
+        <div class="wl-meta">
+          <span class="wl-price">${q ? fmtPrice(q.price) : '—'}</span>
+          <span class="wl-chg ${chgClass}">${q ? chgSign+q.change.toFixed(2)+'%' : '—'}</span>
+        </div>
+        <button class="wl-remove" data-symbol="${symbol}">✕</button>
+      `;
+      el.appendChild(row);
+    });
+    el.querySelectorAll('.wl-remove').forEach(btn=>{
+      btn.addEventListener('click', ()=>{
+        state.watchlist = state.watchlist.filter(s=>s!==btn.dataset.symbol);
+        saveConfig(); renderWatchlist();
+      });
+    });
+  }
+
+  function timeAgo(ts){
+    const diff = Math.floor((Date.now()-ts)/1000);
+    if(diff < 60) return `${diff}s ago`;
+    if(diff < 3600) return `${Math.floor(diff/60)}m ago`;
+    return `${Math.floor(diff/3600)}h ago`;
+  }
+
+  const ICONS = { 'Volume':'📊','RSI':'📈','MA Cross':'📈','Sweep':'🧹','BOS':'🧱','CHoCH':'⚡','FVG':'▭','Daily Close':'🕔','CRT':'🎯' };
+
+  function renderAlertFeed(){
+    const el = document.getElementById('alertFeed');
+    document.getElementById('alertCount').textContent = `${state.alerts.filter(a=>a.ts > Date.now()-86400000).length} today`;
+    if(!state.alerts.length){
+      el.innerHTML = '<div class="alert-empty">Watching. Alerts will appear here as conditions are met.</div>';
+      return;
+    }
+    el.innerHTML = '';
+    state.alerts.slice(0,60).forEach(a=>{
+      const div = document.createElement('div');
+      div.className = `alert ${a.direction==='bull'?'bull':a.direction==='bear'?'bear':'info'}`;
+      div.innerHTML = `
+        <div class="alert-icon">${ICONS[a.type]||'•'}</div>
+        <div class="alert-body">
+          <div class="alert-title">${a.title}</div>
+          <div class="alert-sub">${a.sub}</div>
+        </div>
+        <div class="alert-time">${timeAgo(a.ts)}</div>
+      `;
+      el.appendChild(div);
+    });
+  }
+
+  function renderDetectorToggles(){
+    const el = document.getElementById('detectorToggles');
+    el.innerHTML = '';
+    Object.keys(DETECTOR_LABELS).forEach(key=>{
+      const row = document.createElement('div');
+      row.className = 'toggle-row';
+      row.innerHTML = `<span>${DETECTOR_LABELS[key]}</span><button class="switch ${state.detectors[key]?'on':''}" data-key="${key}"></button>`;
+      el.appendChild(row);
+    });
+    el.querySelectorAll('.switch').forEach(btn=>{
+      btn.addEventListener('click', ()=>{
+        const key = btn.dataset.key;
+        state.detectors[key] = !state.detectors[key];
+        btn.classList.toggle('on');
+        saveConfig();
+      });
+    });
+  }
+
+  function renderRibbon(){
+    const ribbon = document.getElementById('ribbon');
+    ribbon.innerHTML = '';
+    const total = 24*60;
+    const segs = [
+      { label:'Asian', start:19*60, end:24*60+3*60, cls:'asia' }, // display wrap as continuous 19:00-03:00
+      { label:'London', start:3*60, end:8*60, cls:'london' },
+      { label:'New York', start:8*60, end:17*60, cls:'ny' },
+      { label:'Quiet', start:17*60, end:19*60, cls:'' }
+    ];
+    // build a simple 0-24h bar starting at 00:00
+    const order = [
+      { label:'Asian (cont.)', start:0, end:3*60, cls:'asia' },
+      { label:'Quiet', start:3*60-0, end:3*60, cls:'' },
+      { label:'London', start:3*60, end:8*60, cls:'london' },
+      { label:'New York', start:8*60, end:17*60, cls:'ny' },
+      { label:'Quiet', start:17*60, end:19*60, cls:'' },
+      { label:'Asian', start:19*60, end:24*60, cls:'asia' }
+    ];
+    order.forEach(seg=>{
+      const width = (seg.end-seg.start)/total*100;
+      if(width<=0) return;
+      const div = document.createElement('div');
+      div.className = `seg ${seg.cls}`;
+      div.style.width = width+'%';
+      div.textContent = width > 8 ? seg.label : '';
+      ribbon.appendChild(div);
+    });
+    const nowMin = nyMinutesNow();
+    const marker = document.createElement('div');
+    marker.className = 'now-marker';
+    marker.style.left = (nowMin/total*100)+'%';
+    ribbon.appendChild(marker);
+  }
+
+  function updateClock(){
+    const p = nyParts(new Date());
+    document.getElementById('clockDisplay').textContent =
+      `${String(p.h).padStart(2,'0')}:${String(p.m).padStart(2,'0')}:${String(p.s).padStart(2,'0')} NY`;
+  }
+
+  function updateModeIndicator(){
+    const el = document.getElementById('modeIndicator');
+    if(state.apiKey && state.apiKey.trim()){
+      el.innerHTML = '<span class="dot live"></span>Live data — Twelve Data';
+    } else {
+      el.innerHTML = '<span class="dot demo"></span>Demo data (simulated)';
+    }
+  }
+
+  // ---------------- UI WIRING ----------------
+  function wireUI(){
+    document.getElementById('addSymbolBtn').addEventListener('click', ()=>{
+      const input = document.getElementById('addSymbolInput');
+      const val = input.value.trim().toUpperCase();
+      if(val && !state.watchlist.includes(val)){
+        state.watchlist.push(val);
+        input.value = '';
+        saveConfig(); renderWatchlist(); runCycle();
+      }
+    });
+    document.getElementById('addSymbolInput').addEventListener('keydown', (e)=>{
+      if(e.key === 'Enter') document.getElementById('addSymbolBtn').click();
+    });
+    document.getElementById('soundToggleBtn').addEventListener('click', (e)=>{
+      state.soundOn = !state.soundOn;
+      e.target.textContent = state.soundOn ? '🔊 Sound on' : '🔇 Sound off';
+      saveConfig();
+    });
+    document.getElementById('notifyBtn').addEventListener('click', async ()=>{
+      if(!window.Notification){ alert('Notifications not supported in this browser.'); return; }
+      const perm = await Notification.requestPermission();
+      document.getElementById('notifyBtn').textContent = perm === 'granted' ? 'Notifications on' : 'Notifications blocked';
+    });
+    document.getElementById('saveConfigBtn').addEventListener('click', ()=>{
+      state.apiKey = document.getElementById('apiKeyInput').value;
+      state.pollInterval = parseInt(document.getElementById('pollIntervalSelect').value, 10);
+      state.fxClose = document.getElementById('fxCloseInput').value || '17:00';
+      state.idxClose = document.getElementById('idxCloseInput').value || '16:30';
+      state.crtClose = document.getElementById('crtCloseInput').value || '09:00';
+      saveConfig();
+      updateModeIndicator();
+      restartPolling();
+      runCycle();
+    });
+    document.getElementById('clearAlertsBtn').addEventListener('click', ()=>{
+      state.alerts = [];
+      state.firedKeys = {};
+      saveAlerts();
+      renderAlertFeed();
+    });
+  }
+
+  let pollHandle = null;
+  function restartPolling(){
+    if(pollHandle) clearInterval(pollHandle);
+    pollHandle = setInterval(runCycle, state.pollInterval);
+  }
+
+  // ---------------- INIT ----------------
+  async function init(){
+    await loadState();
+    document.getElementById('apiKeyInput').value = state.apiKey || '';
+    document.getElementById('pollIntervalSelect').value = String(state.pollInterval);
+    document.getElementById('fxCloseInput').value = state.fxClose;
+    document.getElementById('idxCloseInput').value = state.idxClose;
+    document.getElementById('crtCloseInput').value = state.crtClose;
+    document.getElementById('soundToggleBtn').textContent = state.soundOn ? '🔊 Sound on' : '🔇 Sound off';
+
+    wireUI();
+    renderDetectorToggles();
+    renderWatchlist();
+    renderAlertFeed();
+    renderRibbon();
+    updateClock();
+    updateModeIndicator();
+
+    setInterval(updateClock, 1000);
+    setInterval(renderRibbon, 60000);
+    setInterval(()=>renderAlertFeed(), 30000);
+
+    restartPolling();
+    runCycle();
+  }
+
+  init();
+
+  if ('serviceWorker' in navigator) {
+    window.addEventListener('load', () => {
+      navigator.serviceWorker.register('service-worker.js').catch(err => console.log('SW registration failed', err));
+    });
+  }
+})();
+</script>
+</body>
+</html>
