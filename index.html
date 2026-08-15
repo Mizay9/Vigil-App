@@ -473,7 +473,7 @@
     const intervalMinutes = { '15min':15, '1h':60, '4h':240, '30min':30 }[interval] || 60;
     if(!state.demoCursor[symbol+interval]){
       const rnd = seededRandom(hashStr(symbol+interval));
-      const base = symbol.includes('XAU') ? 2400 : symbol.includes('/') ? 1.1 : 5500;
+      const base = symbol.includes('XAU') ? 4380 : symbol.includes('/') ? 1.1 : 7780;
       state.demoCursor[symbol+interval] = { rnd, price: base, seedInit: true };
     }
     const cursor = state.demoCursor[symbol+interval];
