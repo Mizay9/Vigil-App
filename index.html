@@ -322,6 +322,7 @@
         <button id="addSymbolBtn">Add</button>
       </div>
       <div class="field-hint" style="padding:6px 4px;">Forex as EUR/USD · Gold as XAU/USD · Indices as SPX, IXIC, DJI (Twelve Data symbols)</div>
+      <div class="field-hint" id="rateLimitHint" style="padding:6px 4px;"></div>
     </div>
   </div>
 
@@ -496,6 +497,44 @@
     { name:'ny', label:'New York', start: 8*60, end: 17*60 }
   ];
 
+  // ---------------- RATE LIMITER ----------------
+  // Twelve Data's free plan allows 8 calls/minute. With multiple symbols x
+  // multiple timeframes, it's easy to burst past that in one poll cycle.
+  // This queues every live-data call and drips them out at a safe pace
+  // instead of firing them all at once.
+  class RateLimiter{
+    constructor(maxPerWindow, windowMs){
+      this.max = maxPerWindow; this.windowMs = windowMs;
+      this.timestamps = []; this.queue = []; this.draining = false;
+    }
+    schedule(fn){
+      return new Promise((resolve, reject) => {
+        this.queue.push({ fn, resolve, reject });
+        this._drain();
+      });
+    }
+    _drain(){
+      if(this.draining) return;
+      this.draining = true;
+      const tick = async () => {
+        if(!this.queue.length){ this.draining = false; return; }
+        const now = Date.now();
+        this.timestamps = this.timestamps.filter(t => now - t < this.windowMs);
+        if(this.timestamps.length < this.max){
+          this.timestamps.push(now);
+          const { fn, resolve, reject } = this.queue.shift();
+          try{ resolve(await fn()); }catch(e){ reject(e); }
+          setTimeout(tick, 120);
+        } else {
+          const waitMs = this.windowMs - (now - this.timestamps[0]) + 100;
+          setTimeout(tick, waitMs);
+        }
+      };
+      tick();
+    }
+  }
+  const tdLimiter = new RateLimiter(7, 60000); // 7, not 8 — small safety margin
+
   // ---------------- DATA LAYER ----------------
   async function fetchCandles(symbol, interval, outputsize){
     if(state.apiKey && state.apiKey.trim()){
@@ -507,8 +546,10 @@
       try{
         const base = state.corsProxyUrl.trim().replace(/\/$/, '');
         const url = `${base}/time_series?symbol=${encodeURIComponent(symbol)}&interval=${interval}&outputsize=${outputsize}&timezone=America/New_York&apikey=${encodeURIComponent(state.apiKey.trim())}`;
-        const res = await fetch(url);
-        const data = await res.json();
+        const data = await tdLimiter.schedule(async () => {
+          const res = await fetch(url);
+          return res.json();
+        });
         if(data && data.values){
           state.lastFetchError = null;
           state.lastFetchOk = Date.now();
@@ -552,33 +593,44 @@
 
   function generateDemoCandles(symbol, interval, outputsize){
     const intervalMinutes = { '15min':15, '1h':60, '4h':240, '30min':30 }[interval] || 60;
-    if(!state.demoCursor[symbol+interval]){
-      const rnd = seededRandom(hashStr(symbol+interval));
+    const key = symbol+interval;
+    if(!state.demoCursor[key]){
+      const rnd = seededRandom(hashStr(key));
       const base = symbol.includes('XAU') ? 4380 : symbol.includes('/') ? 1.1 : 7780;
-      state.demoCursor[symbol+interval] = { rnd, price: base, seedInit: true };
+      const price0 = base;
+      const now = Date.now();
+      const candles = [];
+      let price = price0;
+      // seed the initial history once
+      for(let i=outputsize-1; i>=0; i--){
+        const t = new Date(now - i*intervalMinutes*60000);
+        candles.push(makeDemoCandle(rnd, price, t));
+        price = candles[candles.length-1].c;
+      }
+      state.demoCursor[key] = { rnd, price, candles, lastBarTime: candles[candles.length-1].t };
     }
-    const cursor = state.demoCursor[symbol+interval];
-    const candles = [];
-    let price = cursor.price;
+    const cursor = state.demoCursor[key];
     const now = Date.now();
-    for(let i=outputsize-1; i>=0; i--){
-      const t = new Date(now - i*intervalMinutes*60000);
-      const vol = price * 0.0015;
-      const drift = (cursor.rnd()-0.5) * vol;
-      const o = price;
-      const c = price + drift;
-      const wick = Math.abs(drift) * (0.5 + cursor.rnd());
-      const h = Math.max(o,c) + wick*cursor.rnd();
-      const l = Math.min(o,c) - wick*cursor.rnd();
-      price = c;
-      candles.push({
-        t: nyISOFromDate(t),
-        o, h, l, c,
-        v: Math.round(1000 + cursor.rnd()*4000)
-      });
+    const lastT = new Date(cursor.candles[cursor.candles.length-1].t.replace(' ','T')).getTime();
+    // only append a new bar once a full interval has actually elapsed — history before that stays untouched
+    if(now - lastT >= intervalMinutes*60000){
+      const t = new Date(now);
+      const newCandle = makeDemoCandle(cursor.rnd, cursor.price, t);
+      cursor.candles.push(newCandle);
+      cursor.price = newCandle.c;
+      if(cursor.candles.length > outputsize) cursor.candles.shift();
     }
-    cursor.price = price;
-    return candles;
+    return cursor.candles.slice(-outputsize);
+  }
+  function makeDemoCandle(rnd, price, t){
+    const vol = price * 0.0015;
+    const drift = (rnd()-0.5) * vol;
+    const o = price;
+    const c = price + drift;
+    const wick = Math.abs(drift) * (0.5 + rnd());
+    const h = Math.max(o,c) + wick*rnd();
+    const l = Math.min(o,c) - wick*rnd();
+    return { t: nyISOFromDate(t), o, h, l, c, v: Math.round(1000 + rnd()*4000) };
   }
   function nyISOFromDate(d){
     const p = nyParts(d);
@@ -630,13 +682,13 @@
     const lastClose = candles[candles.length-1].c;
     const trendUp = highs.length>1 && highs[highs.length-1].price > highs[highs.length-2].price;
     if(lastClose > lastHigh.price){
-      const key = `${symbol}-struct-up-${lastHigh.i}`;
+      const key = `${symbol}-struct-up-${lastHigh.t}`;
       alerts.push({ key, type: trendUp ? 'BOS' : 'CHoCH', direction:'bull',
         title: `${symbol}: ${trendUp?'Break of structure':'Change of character'} — bullish`,
         sub: `Close broke above swing high at ${fmtPrice(lastHigh.price)}` });
     }
     if(lastClose < lastLow.price){
-      const key = `${symbol}-struct-dn-${lastLow.i}`;
+      const key = `${symbol}-struct-dn-${lastLow.t}`;
       const trendDown = lows.length>1 && lows[lows.length-1].price < lows[lows.length-2].price;
       alerts.push({ key, type: trendDown ? 'BOS' : 'CHoCH', direction:'bear',
         title: `${symbol}: ${trendDown?'Break of structure':'Change of character'} — bearish`,
@@ -655,13 +707,13 @@
         const mid = (c1.h+c3.l)/2;
         const last = candles[n-1];
         if(i === n-1){
-          alerts.push({ key:`${symbol}-fvg-bull-new-${i}`, type:'FVG', direction:'bull',
+          alerts.push({ key:`${symbol}-fvg-bull-new-${c3.t}`, type:'FVG', direction:'bull',
             title:`${symbol}: Bullish FVG formed`, sub:`Gap ${fmtPrice(c1.h)} – ${fmtPrice(c3.l)}` });
         } else if(last.l <= c3.l && last.l >= c1.h && last.c > mid){
-          alerts.push({ key:`${symbol}-fvg-bull-respect-${i}`, type:'FVG', direction:'bull',
+          alerts.push({ key:`${symbol}-fvg-bull-respect-${c3.t}`, type:'FVG', direction:'bull',
             title:`${symbol}: Bullish FVG respected`, sub:`Price tapped ${fmtPrice(c1.h)}–${fmtPrice(c3.l)} and held` });
         } else if(last.c < c1.h){
-          alerts.push({ key:`${symbol}-fvg-bull-violated-${i}`, type:'FVG', direction:'bear',
+          alerts.push({ key:`${symbol}-fvg-bull-violated-${c3.t}`, type:'FVG', direction:'bear',
             title:`${symbol}: Bullish FVG violated`, sub:`Close broke fully through ${fmtPrice(c1.h)}` });
         }
       }
@@ -670,13 +722,13 @@
         const mid = (c3.h+c1.l)/2;
         const last = candles[n-1];
         if(i === n-1){
-          alerts.push({ key:`${symbol}-fvg-bear-new-${i}`, type:'FVG', direction:'bear',
+          alerts.push({ key:`${symbol}-fvg-bear-new-${c3.t}`, type:'FVG', direction:'bear',
             title:`${symbol}: Bearish FVG formed`, sub:`Gap ${fmtPrice(c3.h)} – ${fmtPrice(c1.l)}` });
         } else if(last.h >= c3.h && last.h <= c1.l && last.c < mid){
-          alerts.push({ key:`${symbol}-fvg-bear-respect-${i}`, type:'FVG', direction:'bear',
+          alerts.push({ key:`${symbol}-fvg-bear-respect-${c3.t}`, type:'FVG', direction:'bear',
             title:`${symbol}: Bearish FVG respected`, sub:`Price tapped ${fmtPrice(c3.h)}–${fmtPrice(c1.l)} and held` });
         } else if(last.c > c1.l){
-          alerts.push({ key:`${symbol}-fvg-bear-violated-${i}`, type:'FVG', direction:'bull',
+          alerts.push({ key:`${symbol}-fvg-bear-violated-${c3.t}`, type:'FVG', direction:'bull',
             title:`${symbol}: Bearish FVG violated`, sub:`Close broke fully through ${fmtPrice(c1.l)}` });
         }
       }
@@ -893,7 +945,11 @@
   }
 
   // ---------------- ALERT ENGINE ----------------
+  let cycleRunning = false;
   async function runCycle(){
+    if(cycleRunning){ console.log('Previous cycle still draining the rate-limit queue — skipping this tick.'); return; }
+    cycleRunning = true;
+    try{
     for(const symbol of state.watchlist){
       try{
         const [c15, c30, c1h, c4h] = await Promise.all([
@@ -928,6 +984,9 @@
     }
     renderWatchlist();
     saveAlerts();
+    }finally{
+      cycleRunning = false;
+    }
   }
 
   function pushAlert(symbol, f){
@@ -965,6 +1024,14 @@
   function renderWatchlist(){
     const el = document.getElementById('watchlist');
     document.getElementById('wlCount').textContent = state.watchlist.length;
+    const callsNeeded = state.watchlist.length * 4;
+    const minutesToDrain = Math.ceil(callsNeeded / 7);
+    const hintEl = document.getElementById('rateLimitHint');
+    if(hintEl){
+      hintEl.textContent = state.apiKey && state.apiKey.trim()
+        ? `Live mode: ${callsNeeded} API calls per cycle, ~${minutesToDrain} min to fully refresh on the free tier (8/min limit). Fewer symbols = faster, more consistent live updates.`
+        : '';
+    }
     el.innerHTML = '';
     state.watchlist.forEach(symbol => {
       const q = state.quotes[symbol];
