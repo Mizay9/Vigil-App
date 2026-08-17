@@ -397,11 +397,16 @@
     volumeSpike: true,
     rsiMa: true,
     sessionSweep: true,
+    prevDaySweep: true,
     bosChoch: true,
     fvg: true,
     dailyCloseRejection: true,
-    crt: true
+    crt: true,
+    trendBreakRetest: true
   };
+
+  const RETEST_TOLERANCE_PCT = 0.0015; // 0.15% proximity counts as a retest touch
+  const RETEST_WINDOW_CANDLES = 24;    // how many 15m candles to watch for a retest after a break
 
   let state = {
     watchlist: DEFAULT_WATCHLIST.slice(),
@@ -418,17 +423,20 @@
     quotes: {},        // symbol -> {price, change}
     alerts: [],         // {id, symbol, type, direction, title, sub, ts}
     firedKeys: {},      // dedupe key -> ts (today)
+    pendingRetests: [], // trend breaks awaiting a 15m retest
     demoCursor: {}      // per symbol synthetic candle generator state
   };
 
   const DETECTOR_LABELS = {
     volumeSpike: "Volume spikes",
     rsiMa: "RSI / moving average",
-    sessionSweep: "Session high/low sweeps",
+    sessionSweep: "Session high/low sweeps (today only)",
+    prevDaySweep: "Previous-day high/low sweep",
     bosChoch: "Break of structure / CHoCH",
-    fvg: "Fair value gaps",
+    fvg: "Fair value gaps (near price only)",
     dailyCloseRejection: "Daily close rejection",
-    crt: "Candle range theory (CRT)"
+    crt: "Candle range theory (CRT)",
+    trendBreakRetest: "Trend break + retest (15m–4H)"
   };
 
   // ---------------- STORAGE ----------------
@@ -446,6 +454,14 @@
     try{
       const raw2 = localStorage.getItem('vigil:alerts');
       if(raw2){ state.alerts = JSON.parse(raw2); }
+    }catch(e){}
+    try{
+      const raw3 = localStorage.getItem('vigil:tracking');
+      if(raw3){
+        const t = JSON.parse(raw3);
+        state.pendingRetests = t.pendingRetests || [];
+        state.firedKeys = t.firedKeys || {};
+      }
     }catch(e){}
   }
   async function saveConfig(){
@@ -467,6 +483,17 @@
     try{
       localStorage.setItem('vigil:alerts', JSON.stringify(state.alerts.slice(0,200)));
     }catch(e){ console.error('save alerts failed', e); }
+  }
+  async function saveTracking(){
+    try{
+      // trim fired keys older than 3 days so this doesn't grow forever
+      const cutoff = Date.now() - 3*24*60*60*1000;
+      Object.keys(state.firedKeys).forEach(k => { if(state.firedKeys[k] < cutoff) delete state.firedKeys[k]; });
+      localStorage.setItem('vigil:tracking', JSON.stringify({
+        pendingRetests: state.pendingRetests,
+        firedKeys: state.firedKeys
+      }));
+    }catch(e){ console.error('save tracking failed', e); }
   }
 
   // ---------------- TIME HELPERS ----------------
@@ -633,9 +660,13 @@
     return { t: nyISOFromDate(t), o, h, l, c, v: Math.round(1000 + rnd()*4000) };
   }
   function nyISOFromDate(d){
-    const p = nyParts(d);
-    const y = d.getFullYear(), mo = String(d.getMonth()+1).padStart(2,'0'), da = String(d.getDate()).padStart(2,'0');
-    return `${y}-${mo}-${da} ${String(p.h).padStart(2,'0')}:${String(p.m).padStart(2,'0')}:00`;
+    const fmt = new Intl.DateTimeFormat('en-CA', {
+      timeZone: 'America/New_York', hour12: false,
+      year:'numeric', month:'2-digit', day:'2-digit', hour:'2-digit', minute:'2-digit', second:'2-digit'
+    });
+    const parts = fmt.formatToParts(d);
+    const obj = {}; parts.forEach(p => obj[p.type] = p.value);
+    return `${obj.year}-${obj.month}-${obj.day} ${obj.hour}:${obj.minute}:${obj.second}`;
   }
 
   // ---------------- INDICATORS ----------------
@@ -670,7 +701,7 @@
     return swings;
   }
 
-  function detectBosChoch(symbol, candles){
+  function detectBosChoch(symbol, candles, tf){
     const alerts = [];
     const swings = findSwings(candles, 2);
     if(swings.length < 3) return alerts;
@@ -682,68 +713,152 @@
     const lastClose = candles[candles.length-1].c;
     const trendUp = highs.length>1 && highs[highs.length-1].price > highs[highs.length-2].price;
     if(lastClose > lastHigh.price){
-      const key = `${symbol}-struct-up-${lastHigh.t}`;
+      const key = `${symbol}-${tf}-struct-up-${lastHigh.t}`;
       alerts.push({ key, type: trendUp ? 'BOS' : 'CHoCH', direction:'bull',
-        title: `${symbol}: ${trendUp?'Break of structure':'Change of character'} — bullish`,
+        title: `${symbol} (${tf}): ${trendUp?'Break of structure':'Change of character'} — bullish`,
         sub: `Close broke above swing high at ${fmtPrice(lastHigh.price)}` });
     }
     if(lastClose < lastLow.price){
-      const key = `${symbol}-struct-dn-${lastLow.t}`;
+      const key = `${symbol}-${tf}-struct-dn-${lastLow.t}`;
       const trendDown = lows.length>1 && lows[lows.length-1].price < lows[lows.length-2].price;
       alerts.push({ key, type: trendDown ? 'BOS' : 'CHoCH', direction:'bear',
-        title: `${symbol}: ${trendDown?'Break of structure':'Change of character'} — bearish`,
+        title: `${symbol} (${tf}): ${trendDown?'Break of structure':'Change of character'} — bearish`,
         sub: `Close broke below swing low at ${fmtPrice(lastLow.price)}` });
     }
     return alerts;
   }
 
-  function detectFVG(symbol, candles){
+  const FVG_PROXIMITY_PCT = 0.006; // only alert on gaps within ~0.6% of current price
+  // ---------------- TREND BREAK + RETEST (15m -> 4H) ----------------
+  // Step 1: on each timeframe, find a break of the prevailing swing structure
+  // and register that level as "pending" — something to watch for a retest.
+  // Step 2: every cycle, check the 15m chart against all pending levels for
+  // a retest touch, then confirm rejection (continuation) or invalidation.
+  function detectTrendBreaks(symbol, candles, tf){
+    const events = [];
+    const swings = findSwings(candles, 2);
+    const highs = swings.filter(s => s.type === 'high');
+    const lows = swings.filter(s => s.type === 'low');
+    if(!highs.length || !lows.length) return events;
+    const lastHigh = highs[highs.length - 1];
+    const lastLow = lows[lows.length - 1];
+    const lastClose = candles[candles.length - 1].c;
+    if(lastClose > lastHigh.price){
+      events.push({ symbol, tf, direction: 'bull', level: lastHigh.price, breakKey: `${symbol}-${tf}-trendbreak-up-${lastHigh.t}` });
+    }
+    if(lastClose < lastLow.price){
+      events.push({ symbol, tf, direction: 'bear', level: lastLow.price, breakKey: `${symbol}-${tf}-trendbreak-dn-${lastLow.t}` });
+    }
+    return events;
+  }
+
+  function registerPendingRetests(breakEvents){
+    breakEvents.forEach(ev => {
+      const already = state.pendingRetests.find(p => p.breakKey === ev.breakKey);
+      if(already || state.firedKeys[ev.breakKey]) return;
+      state.pendingRetests.push({
+        symbol: ev.symbol, tf: ev.tf, direction: ev.direction, level: ev.level,
+        breakKey: ev.breakKey, createdAt: Date.now(), candlesWatched: 0
+      });
+      state.firedKeys[ev.breakKey] = Date.now();
+    });
+  }
+
+  function checkRetests(symbol, candles15){
+    const alerts = [];
+    const stillPending = [];
+    state.pendingRetests.forEach(p => {
+      if(p.symbol !== symbol){ stillPending.push(p); return; }
+      const relevant15 = candles15.filter(c => new Date(c.t.replace(' ', 'T')).getTime() > p.createdAt - 4*60*60*1000);
+      p.candlesWatched = relevant15.length;
+      const tolerance = p.level * RETEST_TOLERANCE_PCT;
+      let resolved = false;
+      for(const c of relevant15){
+        const touched = Math.abs(c.l - p.level) <= tolerance || Math.abs(c.h - p.level) <= tolerance;
+        if(touched){
+          const holds = p.direction === 'bull' ? c.c > p.level : c.c < p.level;
+          const retestKey = `${p.breakKey}-retest`;
+          if(!state.firedKeys[retestKey]){
+            state.firedKeys[retestKey] = Date.now();
+            if(holds){
+              alerts.push({ key: retestKey, type: 'Retest', direction: p.direction,
+                title: `${symbol} (${p.tf}\u219215m): Retest confirmed`,
+                sub: `Price retested ${fmtPrice(p.level)} (broken on ${p.tf}) and held — continuation ${p.direction === 'bull' ? 'higher' : 'lower'}` });
+            } else {
+              alerts.push({ key: retestKey, type: 'Retest', direction: p.direction === 'bull' ? 'bear' : 'bull',
+                title: `${symbol} (${p.tf}\u219215m): Retest failed`,
+                sub: `Price retested ${fmtPrice(p.level)} and reclaimed it — original ${p.tf} break may be invalid` });
+            }
+          }
+          resolved = true;
+          break;
+        }
+      }
+      if(!resolved && p.candlesWatched < RETEST_WINDOW_CANDLES) stillPending.push(p);
+      // else: expired without a retest — drop silently
+    });
+    state.pendingRetests = stillPending;
+    return alerts;
+  }
+
+  function detectFVG(symbol, candles, tf){
     const alerts = [];
     const n = candles.length;
+    const last = candles[n-1];
+    const currentPrice = last.c;
+    const nearPrice = (level) => Math.abs(level - currentPrice) / currentPrice <= FVG_PROXIMITY_PCT;
+
     for(let i=2; i<n; i++){
       const c1 = candles[i-2], c3 = candles[i];
       if(c1.h < c3.l){
-        // bullish FVG
+        // bullish FVG — only act on it if the zone is actually near current price
+        if(!nearPrice(c1.h) && !nearPrice(c3.l)) continue;
         const mid = (c1.h+c3.l)/2;
-        const last = candles[n-1];
         if(i === n-1){
-          alerts.push({ key:`${symbol}-fvg-bull-new-${c3.t}`, type:'FVG', direction:'bull',
-            title:`${symbol}: Bullish FVG formed`, sub:`Gap ${fmtPrice(c1.h)} – ${fmtPrice(c3.l)}` });
+          alerts.push({ key:`${symbol}-${tf}-fvg-bull-new-${c3.t}`, type:'FVG', direction:'bull',
+            title:`${symbol} (${tf}): Bullish FVG formed near price`, sub:`Gap ${fmtPrice(c1.h)} – ${fmtPrice(c3.l)}` });
         } else if(last.l <= c3.l && last.l >= c1.h && last.c > mid){
-          alerts.push({ key:`${symbol}-fvg-bull-respect-${c3.t}`, type:'FVG', direction:'bull',
-            title:`${symbol}: Bullish FVG respected`, sub:`Price tapped ${fmtPrice(c1.h)}–${fmtPrice(c3.l)} and held` });
+          alerts.push({ key:`${symbol}-${tf}-fvg-bull-respect-${c3.t}`, type:'FVG', direction:'bull',
+            title:`${symbol} (${tf}): Bullish FVG respected`, sub:`Price tapped ${fmtPrice(c1.h)}–${fmtPrice(c3.l)} and held` });
         } else if(last.c < c1.h){
-          alerts.push({ key:`${symbol}-fvg-bull-violated-${c3.t}`, type:'FVG', direction:'bear',
-            title:`${symbol}: Bullish FVG violated`, sub:`Close broke fully through ${fmtPrice(c1.h)}` });
+          alerts.push({ key:`${symbol}-${tf}-fvg-bull-violated-${c3.t}`, type:'FVG', direction:'bear',
+            title:`${symbol} (${tf}): Bullish FVG violated`, sub:`Close broke fully through ${fmtPrice(c1.h)}` });
         }
       }
       if(c1.l > c3.h){
-        // bearish FVG
+        // bearish FVG — same proximity rule
+        if(!nearPrice(c3.h) && !nearPrice(c1.l)) continue;
         const mid = (c3.h+c1.l)/2;
-        const last = candles[n-1];
         if(i === n-1){
-          alerts.push({ key:`${symbol}-fvg-bear-new-${c3.t}`, type:'FVG', direction:'bear',
-            title:`${symbol}: Bearish FVG formed`, sub:`Gap ${fmtPrice(c3.h)} – ${fmtPrice(c1.l)}` });
+          alerts.push({ key:`${symbol}-${tf}-fvg-bear-new-${c3.t}`, type:'FVG', direction:'bear',
+            title:`${symbol} (${tf}): Bearish FVG formed near price`, sub:`Gap ${fmtPrice(c3.h)} – ${fmtPrice(c1.l)}` });
         } else if(last.h >= c3.h && last.h <= c1.l && last.c < mid){
-          alerts.push({ key:`${symbol}-fvg-bear-respect-${c3.t}`, type:'FVG', direction:'bear',
-            title:`${symbol}: Bearish FVG respected`, sub:`Price tapped ${fmtPrice(c3.h)}–${fmtPrice(c1.l)} and held` });
+          alerts.push({ key:`${symbol}-${tf}-fvg-bear-respect-${c3.t}`, type:'FVG', direction:'bear',
+            title:`${symbol} (${tf}): Bearish FVG respected`, sub:`Price tapped ${fmtPrice(c3.h)}–${fmtPrice(c1.l)} and held` });
         } else if(last.c > c1.l){
-          alerts.push({ key:`${symbol}-fvg-bear-violated-${c3.t}`, type:'FVG', direction:'bull',
-            title:`${symbol}: Bearish FVG violated`, sub:`Close broke fully through ${fmtPrice(c1.l)}` });
+          alerts.push({ key:`${symbol}-${tf}-fvg-bear-violated-${c3.t}`, type:'FVG', direction:'bull',
+            title:`${symbol} (${tf}): Bearish FVG violated`, sub:`Close broke fully through ${fmtPrice(c1.l)}` });
         }
       }
     }
     return alerts.slice(-4); // avoid flooding
   }
 
+  function minutesFromNyTimeString(t){
+    // t is already an NY-local "YYYY-MM-DD HH:MM:SS" string — parse the clock
+    // part directly rather than going through `new Date()`, which would
+    // re-interpret it in the device's own timezone and silently corrupt it.
+    const timePart = t.split(' ')[1] || '00:00:00';
+    const [h, m] = timePart.split(':').map(Number);
+    return h*60 + m;
+  }
+
   function sessionRangeToday(candles15, session){
-    const today = nyParts(new Date());
+    const todayK = dateKeyFromParts();
     const results = candles15.filter(c => {
-      const d = new Date(c.t.replace(' ','T'));
-      const p = nyParts(d);
-      const mins = p.h*60+p.m;
-      // rough same-day filter using date match on the NY-formatted string's date part
-      return c.t.startsWith(dateKeyFromParts()) && mins >= session.start && mins < session.end;
+      if(!c.t.startsWith(todayK)) return false; // strictly today, NY calendar date
+      const mins = minutesFromNyTimeString(c.t);
+      return mins >= session.start && mins < session.end;
     });
     if(!results.length) return null;
     return {
@@ -752,8 +867,13 @@
     };
   }
   function dateKeyFromParts(){
-    const d = new Date();
-    return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+    const fmt = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/New_York', year:'numeric', month:'2-digit', day:'2-digit' });
+    return fmt.format(new Date()); // en-CA locale formats as YYYY-MM-DD
+  }
+  function weekdayNameForDateKey(dateKey){
+    const [y,m,d] = dateKey.split('-').map(Number);
+    const noonUtc = new Date(Date.UTC(y, m-1, d, 12));
+    return new Intl.DateTimeFormat('en-US', { weekday:'long', timeZone:'America/New_York' }).format(noonUtc);
   }
 
   function detectSessionSweep(symbol, candles15){
@@ -765,16 +885,34 @@
     const nowMin = nyMinutesNow();
     if(asia && london && nowMin >= SESSIONS[2].start){
       if(london.high > asia.high) alerts.push({ key:`${symbol}-sweep-asia-high-${dateKeyFromParts()}`, type:'Sweep', direction:'bear',
-        title:`${symbol}: Asian high swept by London`, sub:`Asian high ${fmtPrice(asia.high)} taken out` });
+        title:`${symbol} (15m): Asian high swept by London`, sub:`Asian high ${fmtPrice(asia.high)} taken out — today, NY time` });
       if(london.low < asia.low) alerts.push({ key:`${symbol}-sweep-asia-low-${dateKeyFromParts()}`, type:'Sweep', direction:'bull',
-        title:`${symbol}: Asian low swept by London`, sub:`Asian low ${fmtPrice(asia.low)} taken out` });
+        title:`${symbol} (15m): Asian low swept by London`, sub:`Asian low ${fmtPrice(asia.low)} taken out — today, NY time` });
     }
     if(london && ny && nowMin >= SESSIONS[3].start){
       if(ny.high > london.high) alerts.push({ key:`${symbol}-sweep-london-high-${dateKeyFromParts()}`, type:'Sweep', direction:'bear',
-        title:`${symbol}: London high swept by New York`, sub:`London high ${fmtPrice(london.high)} taken out` });
+        title:`${symbol} (15m): London high swept by New York`, sub:`London high ${fmtPrice(london.high)} taken out — today, NY time` });
       if(ny.low < london.low) alerts.push({ key:`${symbol}-sweep-london-low-${dateKeyFromParts()}`, type:'Sweep', direction:'bull',
-        title:`${symbol}: London low swept by New York`, sub:`London low ${fmtPrice(london.low)} taken out` });
+        title:`${symbol} (15m): London low swept by New York`, sub:`London low ${fmtPrice(london.low)} taken out — today, NY time` });
     }
+    return alerts;
+  }
+
+  // Uses the actual daily (1day) candles: Twelve Data's last daily bar is
+  // today's still-forming candle, the one before it is the completed prior
+  // trading day. Comparing those directly is more reliable than
+  // reconstructing "yesterday" from a limited window of 15m data.
+  function detectPrevDaySweep(symbol, dailyCandles){
+    const alerts = [];
+    if(!dailyCandles || dailyCandles.length < 2) return alerts;
+    const today = dailyCandles[dailyCandles.length - 1];
+    const prevDay = dailyCandles[dailyCandles.length - 2];
+    const prevDateKey = prevDay.t.slice(0,10);
+    const prevWeekday = weekdayNameForDateKey(prevDateKey);
+    if(today.h > prevDay.h) alerts.push({ key:`${symbol}-prevday-sweep-high-${prevDateKey}`, type:'Sweep', direction:'bear',
+      title:`${symbol} (Daily): ${prevWeekday}'s high swept`, sub:`Prior day high ${fmtPrice(prevDay.h)} taken out today` });
+    if(today.l < prevDay.l) alerts.push({ key:`${symbol}-prevday-sweep-low-${prevDateKey}`, type:'Sweep', direction:'bull',
+      title:`${symbol} (Daily): ${prevWeekday}'s low swept`, sub:`Prior day low ${fmtPrice(prevDay.l)} taken out today` });
     return alerts;
   }
 
@@ -783,9 +921,7 @@
     const alerts = [];
     const todayKey = dateKeyFromParts();
     const candidate = candles30.filter(c=>c.t.startsWith(todayKey)).find(c=>{
-      const d = new Date(c.t.replace(' ','T'));
-      const p = nyParts(d);
-      return Math.abs((p.h*60+p.m) - targetMin) <= 15;
+      return Math.abs(minutesFromNyTimeString(c.t) - targetMin) <= 15;
     });
     if(!candidate) return alerts;
     const range = candidate.h - candidate.l;
@@ -794,10 +930,10 @@
     const lowerWick = Math.min(candidate.o, candidate.c) - candidate.l;
     if(lowerWick/range > 0.6){
       alerts.push({ key:`${symbol}-dclose-rej-bull-${todayKey}`, type:'Daily Close', direction:'bull',
-        title:`${symbol}: ${label} close rejection — bullish`, sub:`Long lower wick into ${closeTimeStr} NY close` });
+        title:`${symbol} (30m): ${label} close rejection — bullish`, sub:`Long lower wick into ${closeTimeStr} NY close, today` });
     } else if(upperWick/range > 0.6){
       alerts.push({ key:`${symbol}-dclose-rej-bear-${todayKey}`, type:'Daily Close', direction:'bear',
-        title:`${symbol}: ${label} close rejection — bearish`, sub:`Long upper wick into ${closeTimeStr} NY close` });
+        title:`${symbol} (30m): ${label} close rejection — bearish`, sub:`Long upper wick into ${closeTimeStr} NY close, today` });
     }
     return alerts;
   }
@@ -807,40 +943,40 @@
     const targetMin = hhmmToMinutes(crtCloseStr);
     const todayKey = dateKeyFromParts();
     const refCandle = candles4h.slice().reverse().find(c=>{
-      const d = new Date(c.t.replace(' ','T'));
-      const p = nyParts(d);
-      return Math.abs((p.h*60+p.m)-targetMin) <= 30;
+      return Math.abs(minutesFromNyTimeString(c.t) - targetMin) <= 30;
     });
     if(!refCandle) return alerts;
-    const after = candles15.filter(c => new Date(c.t.replace(' ','T')) > new Date(refCandle.t.replace(' ','T')));
+    // NY-local "YYYY-MM-DD HH:MM:SS" strings compare correctly with plain
+    // string comparison — no need to round-trip through Date() at all.
+    const after = candles15.filter(c => c.t > refCandle.t);
     if(after.length < 2) return alerts;
     const broke = after.find(c=>c.h > refCandle.h || c.l < refCandle.l);
     if(!broke) return alerts;
     const last = after[after.length-1];
     if(broke.h > refCandle.h && last.c < refCandle.h){
       alerts.push({ key:`${symbol}-crt-bear-${todayKey}`, type:'CRT', direction:'bear',
-        title:`${symbol}: CRT manipulation — bearish reversal`, sub:`Swept above ${fmtPrice(refCandle.h)}, closed back inside range` });
+        title:`${symbol} (4H/15m): CRT manipulation — bearish reversal`, sub:`Swept above ${fmtPrice(refCandle.h)}, closed back inside range` });
     } else if(broke.l < refCandle.l && last.c > refCandle.l){
       alerts.push({ key:`${symbol}-crt-bull-${todayKey}`, type:'CRT', direction:'bull',
-        title:`${symbol}: CRT manipulation — bullish reversal`, sub:`Swept below ${fmtPrice(refCandle.l)}, closed back inside range` });
+        title:`${symbol} (4H/15m): CRT manipulation — bullish reversal`, sub:`Swept below ${fmtPrice(refCandle.l)}, closed back inside range` });
     }
     return alerts;
   }
 
-  function detectVolumeSpike(symbol, candles){
+  function detectVolumeSpike(symbol, candles, tf){
     const alerts = [];
     if(candles.length < 21) return alerts;
     const vols = candles.map(c=>c.v);
     const avg = sma(vols.slice(0,-1), 20);
     const last = candles[candles.length-1];
     if(avg && last.v > avg*2.2){
-      alerts.push({ key:`${symbol}-volspike-${last.t}`, type:'Volume', direction: last.c>=last.o?'bull':'bear',
-        title:`${symbol}: Volume spike`, sub:`${Math.round(last.v/avg*100)}% of 20-period average` });
+      alerts.push({ key:`${symbol}-${tf}-volspike-${last.t}`, type:'Volume', direction: last.c>=last.o?'bull':'bear',
+        title:`${symbol} (${tf}): Volume spike`, sub:`${Math.round(last.v/avg*100)}% of 20-period average` });
     }
     return alerts;
   }
 
-  function detectRsiMa(symbol, candles){
+  function detectRsiMa(symbol, candles, tf){
     const alerts = [];
     const closes = candles.map(c=>c.c);
     const r = rsi(closes, 14);
@@ -849,20 +985,20 @@
     const last = closes[closes.length-1];
     const todayKey = dateKeyFromParts();
     if(r !== null){
-      if(r >= 70) alerts.push({ key:`${symbol}-rsi-ob-${todayKey}`, type:'RSI', direction:'bear',
-        title:`${symbol}: RSI overbought (${r.toFixed(1)})`, sub:`14-period RSI above 70` });
-      if(r <= 30) alerts.push({ key:`${symbol}-rsi-os-${todayKey}`, type:'RSI', direction:'bull',
-        title:`${symbol}: RSI oversold (${r.toFixed(1)})`, sub:`14-period RSI below 30` });
+      if(r >= 70) alerts.push({ key:`${symbol}-${tf}-rsi-ob-${todayKey}`, type:'RSI', direction:'bear',
+        title:`${symbol} (${tf}): RSI overbought (${r.toFixed(1)})`, sub:`14-period RSI above 70` });
+      if(r <= 30) alerts.push({ key:`${symbol}-${tf}-rsi-os-${todayKey}`, type:'RSI', direction:'bull',
+        title:`${symbol} (${tf}): RSI oversold (${r.toFixed(1)})`, sub:`14-period RSI below 30` });
     }
     if(ma20 && ma50){
       const prevCloses = closes.slice(0,-1);
       const prevMa20 = sma(prevCloses, 20);
       const prevMa50 = sma(prevCloses, 50);
       if(prevMa20 && prevMa50){
-        if(prevMa20 <= prevMa50 && ma20 > ma50) alerts.push({ key:`${symbol}-ma-cross-up-${last}`, type:'MA Cross', direction:'bull',
-          title:`${symbol}: 20 MA crossed above 50 MA`, sub:`Bullish moving average cross` });
-        if(prevMa20 >= prevMa50 && ma20 < ma50) alerts.push({ key:`${symbol}-ma-cross-dn-${last}`, type:'MA Cross', direction:'bear',
-          title:`${symbol}: 20 MA crossed below 50 MA`, sub:`Bearish moving average cross` });
+        if(prevMa20 <= prevMa50 && ma20 > ma50) alerts.push({ key:`${symbol}-${tf}-ma-cross-up-${last}`, type:'MA Cross', direction:'bull',
+          title:`${symbol} (${tf}): 20 MA crossed above 50 MA`, sub:`Bullish moving average cross` });
+        if(prevMa20 >= prevMa50 && ma20 < ma50) alerts.push({ key:`${symbol}-${tf}-ma-cross-dn-${last}`, type:'MA Cross', direction:'bear',
+          title:`${symbol} (${tf}): 20 MA crossed below 50 MA`, sub:`Bearish moving average cross` });
       }
     }
     return alerts;
@@ -952,11 +1088,12 @@
     try{
     for(const symbol of state.watchlist){
       try{
-        const [c15, c30, c1h, c4h] = await Promise.all([
+        const [c15, c30, c1h, c4h, cDaily] = await Promise.all([
           fetchCandles(symbol, '15min', 120),
           fetchCandles(symbol, '30min', 60),
           fetchCandles(symbol, '1h', 120),
-          fetchCandles(symbol, '4h', 80)
+          fetchCandles(symbol, '4h', 80),
+          fetchCandles(symbol, '1day', 5)
         ]);
         if(c1h.length){
           const last = c1h[c1h.length-1];
@@ -964,16 +1101,25 @@
           state.quotes[symbol] = { price: last.c, change: prev.c ? ((last.c-prev.c)/prev.c*100) : 0 };
         }
         let found = [];
-        if(state.detectors.volumeSpike) found = found.concat(detectVolumeSpike(symbol, c1h));
-        if(state.detectors.rsiMa) found = found.concat(detectRsiMa(symbol, c1h));
+        if(state.detectors.volumeSpike) found = found.concat(detectVolumeSpike(symbol, c1h, '1H'));
+        if(state.detectors.rsiMa) found = found.concat(detectRsiMa(symbol, c1h, '1H'));
         if(state.detectors.sessionSweep) found = found.concat(detectSessionSweep(symbol, c15));
-        if(state.detectors.bosChoch) found = found.concat(detectBosChoch(symbol, c4h));
-        if(state.detectors.fvg) found = found.concat(detectFVG(symbol, c1h));
+        if(state.detectors.prevDaySweep) found = found.concat(detectPrevDaySweep(symbol, cDaily));
+        if(state.detectors.bosChoch) found = found.concat(detectBosChoch(symbol, c4h, '4H'));
+        if(state.detectors.fvg) found = found.concat(detectFVG(symbol, c1h, '1H'));
         if(state.detectors.dailyCloseRejection){
           const isFx = symbol.includes('/') && !symbol.includes('XAU');
           found = found.concat(detectDailyCloseRejection(symbol, c30, isFx?state.fxClose:state.idxClose, isFx?'FX':'Index/Gold'));
         }
         if(state.detectors.crt) found = found.concat(detectCRT(symbol, c4h, c15, state.crtClose));
+
+        if(state.detectors.trendBreakRetest){
+          const breaks15 = detectTrendBreaks(symbol, c15, '15m');
+          const breaks1h = detectTrendBreaks(symbol, c1h, '1H');
+          const breaks4h = detectTrendBreaks(symbol, c4h, '4H');
+          registerPendingRetests([...breaks15, ...breaks1h, ...breaks4h]);
+          found = found.concat(checkRetests(symbol, c15));
+        }
 
         found.forEach(f => {
           if(state.firedKeys[f.key]) return;
@@ -984,6 +1130,7 @@
     }
     renderWatchlist();
     saveAlerts();
+    saveTracking();
     }finally{
       cycleRunning = false;
     }
@@ -1024,7 +1171,7 @@
   function renderWatchlist(){
     const el = document.getElementById('watchlist');
     document.getElementById('wlCount').textContent = state.watchlist.length;
-    const callsNeeded = state.watchlist.length * 4;
+    const callsNeeded = state.watchlist.length * 5;
     const minutesToDrain = Math.ceil(callsNeeded / 7);
     const hintEl = document.getElementById('rateLimitHint');
     if(hintEl){
